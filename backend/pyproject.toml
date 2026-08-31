@@ -12,8 +12,8 @@ dependencies = [
     "zeroconf>=0.38.0",
     "pycryptodome>=3.15.0",
     "av>=10.0.0",
-    # Spotify Connect: 未发布到 PyPI, 直接引用 GitHub
-    "librespot-python @ git+https://github.com/kokarare1212/librespot-python.git",
+    # Spotify Connect 协议引擎 (kokarare1212/librespot-python 的 PyPI 包名)
+    "librespot==0.0.10",
     "python-jose[cryptography]>=3.3.0",
     "bcrypt>=4.0.0",
     "websockets>=12.0",
