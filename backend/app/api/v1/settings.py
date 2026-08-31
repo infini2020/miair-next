@@ -57,6 +57,7 @@ async def get_settings_api(
         "default_audio_id": config.default_audio_id,
         "touchscreen_lyrics": config.touchscreen_lyrics,
         "default_cover_url": config.default_cover_url,
+        "enable_spotify": config.enable_spotify,
     }
 
     speakers_info = {}
@@ -116,6 +117,8 @@ async def save_settings_api(
         config.default_audio_id = payload.default_audio_id.strip()
     if payload.touchscreen_lyrics is not None:
         config.touchscreen_lyrics = payload.touchscreen_lyrics
+    if payload.enable_spotify is not None:
+        config.enable_spotify = payload.enable_spotify
     if payload.notify_type is not None:
         config.notify_type = payload.notify_type.strip()
     if payload.notify_feishu_webhook is not None:

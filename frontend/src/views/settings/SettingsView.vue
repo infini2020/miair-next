@@ -37,6 +37,17 @@
                 <n-form-item label="设备离线自动重启">
                   <n-switch v-model:value="form.auto_restart" />
                 </n-form-item>
+                <n-form-item label="Spotify Connect 接收">
+                  <div class="field-with-tip">
+                    <n-space align="center" :size="8">
+                      <n-switch v-model:value="form.enable_spotify" />
+                      <n-tag size="small" type="warning" round>Beta</n-tag>
+                    </n-space>
+                    <n-text depth="3" class="field-tip">
+                      每个音箱广播为独立的 Spotify Connect 设备, 在 Spotify App 的设备列表中选择即可投送播放。需要 Spotify Premium 账号; 修改后自动重启服务。
+                    </n-text>
+                  </div>
+                </n-form-item>
               </n-space>
             </n-form>
           </n-tab-pane>
@@ -323,6 +334,7 @@ const form = reactive({
   default_cover_url: '',
   default_audio_id: '',
   touchscreen_lyrics: false,
+  enable_spotify: true,
   notify_type: '',
   notify_feishu_webhook: '',
   notify_feishu_secret: '',
@@ -395,6 +407,7 @@ async function load() {
     form.default_cover_url = s.default_cover_url || ''
     form.default_audio_id = s.default_audio_id || ''
     form.touchscreen_lyrics = s.touchscreen_lyrics ?? false
+    form.enable_spotify = s.enable_spotify ?? true
     form.notify_type = s.notify_type
     form.notify_feishu_webhook = s.notify_feishu_webhook
     form.notify_feishu_secret = s.notify_feishu_secret

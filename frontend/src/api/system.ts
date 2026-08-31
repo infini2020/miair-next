@@ -28,6 +28,7 @@ export interface Settings {
   default_cover_url: string
   default_audio_id: string
   touchscreen_lyrics: boolean
+  enable_spotify: boolean
   notify_type: string
   notify_feishu_webhook: string
   notify_feishu_secret: string

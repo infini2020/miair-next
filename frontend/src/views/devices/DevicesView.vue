@@ -59,6 +59,15 @@ const columns: DataTableColumns<SpeakerStatus> = [
       h(NSpace, { size: 4 }, () => [
         h(NTag, { size: 'small', type: row.transport_state === 'PLAYING' ? 'success' : 'default' }, () => `DLNA: ${row.transport_state}`),
         h(NTag, { size: 'small', type: row.airplay_active ? 'success' : 'default' }, () => `AirPlay: ${row.airplay_active ? '播放' : '空闲'}`),
+        h(NTooltip, { trigger: 'hover' }, {
+          trigger: () =>
+            h(NTag, { size: 'small', type: row.spotify_playing ? 'success' : row.spotify_paired ? 'info' : 'default' }, () =>
+              `Spotify: ${row.spotify_playing ? '播放' : row.spotify_paired ? '已连接' : '未配对'}`),
+          default: () =>
+            row.spotify_track
+              ? `${row.spotify_track}${row.spotify_artist ? ' - ' + row.spotify_artist : ''}`
+              : row.spotify_paired ? '已配对, 等待播放' : '在 Spotify App 的设备列表中选择该音箱进行配对',
+        }),
       ]),
   },
   {

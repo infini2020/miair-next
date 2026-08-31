@@ -50,6 +50,20 @@ async def list_speakers(orch: Orchestrator = Depends(get_orchestrator)):
                     airplay_active = True
                     airplay_client = sap.airplay_server.client_name
 
+        # 获取 Spotify Connect 状态
+        spotify_paired = False
+        spotify_playing = False
+        spotify_track = ""
+        spotify_artist = ""
+        if orch.spotify_manager:
+            ss = orch.spotify_manager.speaker_spotify.get(did)
+            if ss:
+                st = ss.status()
+                spotify_paired = st["spotify_paired"]
+                spotify_playing = st["spotify_playing"]
+                spotify_track = st["spotify_track"]
+                spotify_artist = st["spotify_artist"]
+
         speakers_info.append({
             "did": did,
             "name": speaker.name,
@@ -62,6 +76,10 @@ async def list_speakers(orch: Orchestrator = Depends(get_orchestrator)):
             "current_uri": current_uri,
             "airplay_active": airplay_active,
             "airplay_client": airplay_client,
+            "spotify_paired": spotify_paired,
+            "spotify_playing": spotify_playing,
+            "spotify_track": spotify_track,
+            "spotify_artist": spotify_artist,
         })
     return speakers_info
 
@@ -102,6 +120,16 @@ async def rename_speaker(
                 log.info(f"已更新 AirPlay 广播名: {payload.dlna_name} (did={did})")
             except Exception as e:
                 log.error(f"更新 AirPlay 广播名失败 (did={did}): {e}")
+
+    # 同步更新 Spotify Connect 广播名 (mDNS 与设备 ID 均由名称派生)
+    if orch.spotify_manager:
+        ss = orch.spotify_manager.speaker_spotify.get(did)
+        if ss:
+            try:
+                await ss.rename(payload.dlna_name)
+                log.info(f"已更新 Spotify Connect 广播名: {payload.dlna_name} (did={did})")
+            except Exception as e:
+                log.error(f"更新 Spotify Connect 广播名失败 (did={did}): {e}")
 
     return {"ok": True, "dlna_name": payload.dlna_name}
 

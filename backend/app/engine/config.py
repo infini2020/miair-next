@@ -90,6 +90,9 @@ class Config:
     # 触屏歌词匹配 (DLNA 路线)：每首歌按投送元数据中的歌名/歌手搜小米曲库，
     # 命中则用真实 audioID 使触屏音箱显示该曲歌词与封面；未命中回退 default_audio_id。
     touchscreen_lyrics: bool = False
+    # Spotify Connect 接收 (参考 infini2020/SpotConnect): mDNS 广播虚拟设备,
+    # 手机 Spotify 客户端配对后推送播放。需要 Spotify Premium 账号。
+    enable_spotify: bool = True
     # 语音控制
     enable_voice_control: bool = False
     # 自动重启（当登录失败或服务异常时）

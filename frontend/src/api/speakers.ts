@@ -12,6 +12,10 @@ export interface SpeakerStatus {
   current_uri: string
   airplay_active: boolean
   airplay_client: string
+  spotify_paired: boolean
+  spotify_playing: boolean
+  spotify_track: string
+  spotify_artist: string
 }
 
 export interface CloudDevice {

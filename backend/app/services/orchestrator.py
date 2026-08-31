@@ -18,6 +18,7 @@ from app.engine.dlna.renderer import DLNARenderer
 from app.engine.dlna.ssdp import SSDPServer
 from app.engine.restart import _restart_process
 from app.engine.speaker import SpeakerManager
+from app.engine.spotify.manager import SpotifyManager
 
 log = logging.getLogger("miair")
 
@@ -35,6 +36,7 @@ class Orchestrator:
         self.device_server: DeviceServer | None = None
         self.dlna_running = False
         self.airplay_manager: AirPlayManager | None = None
+        self.spotify_manager: SpotifyManager | None = None
         self._device_check_task: asyncio.Task | None = None
         # 重启串行化: 防止连续扫码/保存设置触发多个 restart 并发互相踩踏
         self._restart_lock = asyncio.Lock()
@@ -163,8 +165,11 @@ class Orchestrator:
             # 启动 AirPlay 服务 - 每个音箱一个
             await self._start_airplay_for_speakers()
 
+            # 启动 Spotify Connect 服务 - 每个音箱一个
+            await self._start_spotify_for_speakers()
+
             log.info(f"MiAir Next 服务启动完成! 共 {len(self.renderers)} 个音箱")
-            log.info("手机 DLNA / AirPlay 现在应该能发现这些设备了")
+            log.info("手机 DLNA / AirPlay / Spotify Connect 现在应该能发现这些设备了")
 
         except Exception as e:
             log.error(f"启动 DLNA 服务失败: {e}")
@@ -195,14 +200,38 @@ class Orchestrator:
         except Exception as e:
             log.error(f"启动 AirPlay 服务失败: {e}")
 
+    async def _start_spotify_for_speakers(self):
+        """为每个音箱启动独立的 Spotify Connect 接收服务"""
+        try:
+            # 先停掉上一次的 Spotify Connect 实例, 避免旧端口 / mDNS 注册泄漏
+            if self.spotify_manager:
+                await self.spotify_manager.stop()
+                self.spotify_manager = None
+
+            if not getattr(self.config, "enable_spotify", False):
+                log.info("Spotify Connect 未启用, 跳过启动 (可在设置中开启)")
+                return
+
+            if not self.speaker_manager.controllers:
+                log.warning("没有可用的音箱, 无法启动 Spotify Connect 服务")
+                return
+
+            self.spotify_manager = SpotifyManager(self.config.hostname, config=self.config)
+            await self.spotify_manager.start_for_speakers(self.speaker_manager.controllers)
+        except Exception as e:
+            log.error(f"启动 Spotify Connect 服务失败: {e}")
+
     async def restart_dlna_services(self):
         """重启 DLNA 服务 (用户通过 Web 修改配置后调用)"""
         async with self._restart_lock:
             await self._stop_dlna_services()
-            # 先停掉旧的 AirPlay, 避免重启失败时旧实例带着过期音箱残留
+            # 先停掉旧的 AirPlay / Spotify Connect, 避免重启失败时旧实例带着过期音箱残留
             if self.airplay_manager:
                 await self.airplay_manager.stop()
                 self.airplay_manager = None
+            if self.spotify_manager:
+                await self.spotify_manager.stop()
+                self.spotify_manager = None
             # 清空旧 controllers, 防止 AirPlay 停止回调触发旧 auth 重新登录
             # (旧 controller 持有旧 auth 引用, close() 后回调会触发并发登录)
             if self.speaker_manager:
@@ -238,6 +267,9 @@ class Orchestrator:
         if self.airplay_manager:
             await self.airplay_manager.stop()
             self.airplay_manager = None
+        if self.spotify_manager:
+            await self.spotify_manager.stop()
+            self.spotify_manager = None
         await self.auth.close()
 
         log.info("MiAir Next 已关闭")
