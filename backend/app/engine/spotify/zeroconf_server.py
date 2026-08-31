@@ -10,10 +10,10 @@ blob 解密流程 (cspot LoginBlob::loadZeroconfQuery):
   base_key   = SHA1(shared_key)[:16]
   enc_key    = HMAC-SHA1(base_key, "encryption")[:16]
   blob       = AES-CTR(enc_key, iv) 解密
-得到第一层明文后，剩余的二次解密 (PBKDF2/AES-ECB) 由 librespot 的
-Session.Builder.decrypt_blob 完成。注意 librespot-python 0.0.10 的
-decrypt_blob 会对入参先做 base64 解码，因此这里传入 base64 编码后的
-第一层明文以保持兼容。
+第一层明文本身是 base64 文本 (第二层 AES-ECB 密文的 base64), 解出后
+直接透传给 librespot 的 Session.Builder.blob —— 其 decrypt_blob 会先
+对入参做 base64 解码再做 PBKDF2/AES-ECB 二次解密 (与 librespot 自带
+ZeroconfServer.handle_add_user 的 .blob(username, decrypted) 一致)。
 """
 
 import base64
@@ -158,7 +158,7 @@ class SpotifyZeroconfReceiver:
                 {"status": 102, "statusString": "ERROR", "spotifyError": 1}
             )
         log.info(f"Spotify Zeroconf: 用户 {username} 配对成功 (设备 {self.device_name})")
-        # 通知上层建立会话 (librespot decrypt_blob 需要 base64 输入, 见模块说明)
+        # 通知上层建立会话 (decrypted 为 base64 文本, 直接透传给 Session.Builder.blob)
         if self.on_credentials is not None:
             await self.on_credentials(username, decrypted)
         return web.json_response(dict(_SUCCESS_RESPONSE))

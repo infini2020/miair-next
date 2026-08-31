@@ -12,7 +12,6 @@
 """
 
 import asyncio
-import base64
 import logging
 import os
 
@@ -151,24 +150,26 @@ class SpeakerSpotify:
     async def _handle_credentials(self, username: str, blob: bytes):
         """Zeroconf 配对回调: 用解密后的第一层 blob 建立 Spotify 会话
 
-        librespot Session.Builder.blob 内部 decrypt_blob 会先对入参做
-        base64 解码, 因此这里传 b64 编码后的第一层明文。
+        blob 为第一层 (DH + AES-CTR) 解密输出, 内容本身是 base64 文本
+        (第二层 AES-ECB 密文的 base64)。librespot Session.Builder.blob
+        内部 decrypt_blob 会先对入参做 base64 解码再解第二层, 因此直接
+        透传原始 bytes (与 librespot ZeroconfServer.handle_add_user 的
+        .blob(username, decrypted) 一致), 不能再额外 b64encode。
         """
-        blob_b64 = base64.b64encode(blob).decode()
         try:
-            await self._start_session(username, blob_b64)
+            await self._start_session(username, blob)
         except Exception as e:
             log.error(f"Spotify 登录失败 (设备 {self.device_name}): {e}")
             # 配对的凭据无法使用, 清掉等待下次重新配对
             self._remove_credentials()
 
-    async def _start_session(self, username: str | None = None, blob_b64: str | None = None):
+    async def _start_session(self, username: str | None = None, blob: bytes | None = None):
         async with self._login_lock:
             if self._closed:
                 return
             # 换账号/重新配对时先释放旧会话
             await self._close_session()
-            self.session = await asyncio.to_thread(self._create_session, username, blob_b64)
+            self.session = await asyncio.to_thread(self._create_session, username, blob)
 
             self.player = SpotifyPlayer(
                 self.session, None, self.audio_server, self.controller, config=self.config
@@ -183,7 +184,7 @@ class SpeakerSpotify:
                 f"(用户 {self.session.username()}, 凭据已存 {self._credentials_file})"
             )
 
-    def _create_session(self, username: str | None, blob_b64: str | None) -> Session:
+    def _create_session(self, username: str | None, blob: bytes | None) -> Session:
         """创建 librespot 会话 (阻塞: TCP + 认证, 供 to_thread 调用)"""
         os.makedirs(os.path.dirname(self._credentials_file), exist_ok=True)
         conf = (
@@ -200,8 +201,8 @@ class SpeakerSpotify:
             .set_device_type(Connect.DeviceType.SPEAKER)
             .set_preferred_locale("zh")
         )
-        if blob_b64:
-            builder.blob(username, blob_b64.encode())
+        if blob is not None:
+            builder.blob(username, blob)
         else:
             builder.stored_file(self._credentials_file)
         return builder.create()
