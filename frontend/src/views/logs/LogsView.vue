@@ -39,13 +39,14 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import {
   NSpace, NTag, NButton, NCheckbox, NLog, NPopconfirm, NSelect, useMessage,
 } from 'naive-ui'
-import { fetchLogs, fetchLogLevel, setLogLevel, downloadLogs, type LogLevel } from '@/api/system'
+import { fetchLogLevel, setLogLevel, downloadLogs, type LogLevel } from '@/api/system'
 import { useWebSocket } from '@/composables/useWebSocket'
 import ToolbarCard from '@/components/ToolbarCard.vue'
 
 const message = useMessage()
+// 日志数据完全来自 WebSocket: 连接建立时后端重放最近日志 + 实时增量,
+// 不再混用 REST 历史接口 (旧方式存在 WS 先连、REST 后到的乱序与重复)
 const { connected, logLines } = useWebSocket()
-const history = ref<string[]>([])
 const autoScroll = ref(true)
 const logRef = ref<InstanceType<typeof NLog> | null>(null)
 
@@ -76,8 +77,8 @@ async function changeLevel(level: LogLevel) {
   }
 }
 
-// 历史日志 (挂载时拉取) + 实时日志 (WebSocket) 合并展示
-const logText = computed(() => [...history.value, ...logLines.value].join('\n'))
+// 历史日志 (连接时后端重放) + 实时日志 (增量推送) 同一数据源
+const logText = computed(() => logLines.value.join('\n'))
 
 watch(logText, () => {
   if (autoScroll.value) {
@@ -86,7 +87,6 @@ watch(logText, () => {
 })
 
 function clear() {
-  history.value = []
   logLines.value.length = 0
 }
 
@@ -102,12 +102,6 @@ async function download() {
 }
 
 onMounted(async () => {
-  try {
-    const res = await fetchLogs(300)
-    history.value = res.lines
-  } catch {
-    /* 忽略历史日志加载失败 */
-  }
   try {
     logLevel.value = (await fetchLogLevel()).level
   } catch {

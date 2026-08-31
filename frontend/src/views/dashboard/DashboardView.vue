@@ -34,9 +34,18 @@
                 <n-tag :type="sp.airplay_active ? 'success' : 'default'" size="small">
                   AirPlay: {{ sp.airplay_active ? '播放中' : '空闲' }}
                 </n-tag>
+                <n-tag
+                  :type="sp.spotify_playing ? 'success' : sp.spotify_paired ? 'info' : 'default'"
+                  size="small"
+                >
+                  Spotify: {{ sp.spotify_playing ? '播放中' : sp.spotify_paired ? '已配对' : '未配对' }}
+                </n-tag>
               </n-space>
             </template>
-            <div v-if="sp.current_uri" class="uri">{{ sp.current_uri }}</div>
+            <div v-if="sp.spotify_track" class="uri">
+              {{ sp.spotify_track }}{{ sp.spotify_artist ? ' - ' + sp.spotify_artist : '' }}
+            </div>
+            <div v-else-if="sp.current_uri" class="uri">{{ sp.current_uri }}</div>
           </n-thing>
         </n-list-item>
       </n-list>
@@ -55,7 +64,9 @@ import { fetchStatus, type SystemStatus } from '@/api/system'
 const { connected, status } = useWebSocket()
 
 const playingCount = computed(
-  () => status.value?.speakers.filter((s) => s.transport_state === 'PLAYING' || s.airplay_active).length ?? 0,
+  () => status.value?.speakers.filter(
+    (s) => s.transport_state === 'PLAYING' || s.airplay_active || s.spotify_playing,
+  ).length ?? 0,
 )
 
 // 运行时长 / 内存指标 (REST 拉取, 30s 刷新一次)

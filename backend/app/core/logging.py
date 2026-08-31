@@ -5,9 +5,29 @@ import collections
 import logging
 import os
 import sys
+import threading
 from logging.handlers import RotatingFileHandler
 
 LOG_NAME = "miair"
+
+
+def _safe_put(q: asyncio.Queue, line: str):
+    """向订阅队列投递一条日志 (事件循环线程内执行)。
+
+    队列满时丢最旧一条保最新: 订阅方消费过慢时宁可日志页缺旧不缺新,
+    且避免 put_nowait 抛 QueueFull 被 loop 异常处理器吞成 stderr 噪音。
+    """
+    try:
+        q.put_nowait(line)
+    except asyncio.QueueFull:
+        try:
+            q.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        try:
+            q.put_nowait(line)
+        except asyncio.QueueFull:
+            pass
 
 
 class RingBufferHandler(logging.Handler):
@@ -18,9 +38,17 @@ class RingBufferHandler(logging.Handler):
         self.buffer: collections.deque[str] = collections.deque(maxlen=capacity)
         self._subscribers: set[asyncio.Queue] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
+        # 串行化 emit 与 subscribe 的"入队 + 快照"顺序, 保证
+        # "先快照后订阅"模式下订阅方不重不漏 (emit 在任意打日志线程调用)
+        self._lock = threading.Lock()
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
+
+    def snapshot(self) -> list[str]:
+        """当前缓冲快照 (subscribe 前调用, 配合订阅增量构成完整视图)"""
+        with self._lock:
+            return list(self.buffer)
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=200)
@@ -35,13 +63,11 @@ class RingBufferHandler(logging.Handler):
             line = self.format(record)
         except Exception:
             return
-        self.buffer.append(line)
-        if self._loop and self._subscribers:
-            for q in list(self._subscribers):
-                try:
-                    self._loop.call_soon_threadsafe(q.put_nowait, line)
-                except Exception:
-                    pass
+        with self._lock:
+            self.buffer.append(line)
+            if self._loop and self._subscribers:
+                for q in list(self._subscribers):
+                    self._loop.call_soon_threadsafe(_safe_put, q, line)
 
 
 ring_handler = RingBufferHandler()
