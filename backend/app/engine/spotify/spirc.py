@@ -14,6 +14,7 @@ from librespot.core import Session
 from librespot.mercury import MercuryClient, RawMercuryRequest
 
 from app.engine.spotify import spirc_pb2 as spirc
+from app.engine.spotify.errors import exc_desc
 
 log = logging.getLogger("miair")
 
@@ -181,7 +182,7 @@ class SpircController:
             frame.ParseFromString(data)
             self._handle_frame(frame)
         except Exception as e:
-            log.error(f"Spotify SPIRC 帧解析失败: {e}")
+            log.error(f"Spotify SPIRC 帧解析失败: {exc_desc(e)}")
 
     def _dispatch(self, coro):
         try:
@@ -310,6 +311,6 @@ class SpircController:
             try:
                 self._subscribe()
             except Exception as e:
-                log.warning(f"Spotify: 重新订阅失败: {e}")
+                log.warning(f"Spotify: 重新订阅失败: {exc_desc(e)}")
                 raise
         self._send_cmd(spirc.kMessageTypeNotify)

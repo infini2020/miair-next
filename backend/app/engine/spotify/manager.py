@@ -22,6 +22,8 @@ from librespot.proto import Connect_pb2 as Connect
 
 from app.engine.speaker import SpeakerController
 from app.engine.spotify.audio_server import SpotifyAudioServer
+from app.engine.spotify.errors import exc_desc as _exc_desc
+from app.engine.spotify.errors import is_network_error as _is_network_error
 from app.engine.spotify.player import SpotifyPlayer
 from app.engine.spotify.spirc import SpircController
 from app.engine.spotify.zeroconf_server import SpotifyZeroconfReceiver
@@ -29,6 +31,7 @@ from app.engine.spotify.zeroconf_server import SpotifyZeroconfReceiver
 log = logging.getLogger("miair")
 
 _HEARTBEAT_INTERVAL = 30  # 秒, SPIRC Notify 保活与进度上报
+_HEARTBEAT_MAX_FAILURES = 3  # 连续失败 N 次后重建会话
 
 
 class SpeakerSpotify:
@@ -159,9 +162,20 @@ class SpeakerSpotify:
         try:
             await self._start_session(username, blob)
         except Exception as e:
-            log.error(f"Spotify 登录失败 (设备 {self.device_name}): {e}")
-            # 配对的凭据无法使用, 清掉等待下次重新配对
-            self._remove_credentials()
+            desc = _exc_desc(e)
+            if _is_network_error(e):
+                # 网络类失败 (连接被重置/超时/DNS): 配对凭据本身有效且可复用,
+                # 保留凭据, 心跳循环会检测到会话缺失并自动重登
+                log.warning(
+                    f"Spotify 登录暂未成功 (设备 {self.device_name}, 疑似网络问题): {desc}",
+                    exc_info=True,
+                )
+            else:
+                # 认证/协议类失败: 凭据确实无法使用, 清掉等待下次重新配对
+                log.error(
+                    f"Spotify 登录失败 (设备 {self.device_name}): {desc}", exc_info=True
+                )
+                self._remove_credentials()
 
     async def _start_session(self, username: str | None = None, blob: bytes | None = None):
         async with self._login_lock:
@@ -171,14 +185,20 @@ class SpeakerSpotify:
             await self._close_session()
             self.session = await asyncio.to_thread(self._create_session, username, blob)
 
-            self.player = SpotifyPlayer(
-                self.session, None, self.audio_server, self.controller, config=self.config
-            )
-            self.spirc = SpircController(
-                self.session, self.device_name, self.device_id, handler=self.player
-            )
-            self.player.spirc = self.spirc
-            await asyncio.to_thread(self.spirc.start)
+            try:
+                self.player = SpotifyPlayer(
+                    self.session, None, self.audio_server, self.controller, config=self.config
+                )
+                self.spirc = SpircController(
+                    self.session, self.device_name, self.device_id, handler=self.player
+                )
+                self.player.spirc = self.spirc
+                await asyncio.to_thread(self.spirc.start)
+            except Exception:
+                # 会话已建立但 SPIRC 启动失败 (Mercury 订阅/连接断开):
+                # 释放半死会话, 避免残留的 session/spirc 让心跳持续撞死连接
+                await self._close_session()
+                raise
             log.info(
                 f"Spotify 会话已建立: {self.device_name} "
                 f"(用户 {self.session.username()}, 凭据已存 {self._credentials_file})"
@@ -233,18 +253,50 @@ class SpeakerSpotify:
     # ============================================================
 
     async def _heartbeat_loop(self):
+        failures = 0
         while not self._closed:
             await asyncio.sleep(_HEARTBEAT_INTERVAL)
-            if self._closed or not self.spirc or not self.session:
+            if self._closed:
+                continue
+
+            # 会话缺失但有存储凭据: 自动恢复 (上次登录失败可能是网络抖动,
+            # stored credential 可复用, 无需用户重新配对)
+            if (not self.session or not self.spirc) and not self._login_lock.locked():
+                if os.path.isfile(self._credentials_file):
+                    try:
+                        await self._start_session()
+                        failures = 0
+                    except Exception as e:
+                        log.warning(
+                            f"Spotify 会话自动恢复失败 ({self.device_name}): "
+                            f"{_exc_desc(e)}"
+                        )
+                continue
+
+            if not self.spirc or not self.session:
                 continue
             try:
                 if not self.session.is_valid():
                     continue  # librespot 正在自动重连, heartbeat 会检测到新 connection
                 await asyncio.to_thread(self.spirc.heartbeat)
+                failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                log.warning(f"Spotify 心跳失败 ({self.device_name}): {e}")
+                failures += 1
+                log.warning(
+                    f"Spotify 心跳失败 ({self.device_name}) [连续 {failures} 次]: "
+                    f"{_exc_desc(e)}"
+                )
+                if failures >= _HEARTBEAT_MAX_FAILURES:
+                    # 连续失败: 连接已死 (被重置/超时), 释放会话,
+                    # 下一轮心跳将凭存储凭据自动重建
+                    failures = 0
+                    log.warning(
+                        f"Spotify: {self.device_name} 连续 {_HEARTBEAT_MAX_FAILURES} 次"
+                        f"心跳失败, 重建会话"
+                    )
+                    await self._close_session()
 
 
 class SpotifyManager:
