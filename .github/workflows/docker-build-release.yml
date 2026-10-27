@@ -1,31 +1,40 @@
-# 构建 + GitHub Container Registry 版本发布 (唯一的镜像发布工作流)
-#
-# 发布策略 (2026-10-20 调整):
-#   - 只在 GitHub 上发布镜像 (GHCR: ghcr.io/<owner>/<repo>), 不使用 Docker Hub
-#   - 镜像标签 = 版本号: v0.7.0 -> 0.7.0 / 0.7 / latest
-#   - 非 main 分支普通 push: 仅做多架构构建验证, 不推送
-#   - push v*.*.* tag 或手动指定 version: 构建并推送 GHCR
-#
-# 本工作流已替代 docker-publish.yml: 不再推送 Docker Hub, 只在 GitHub (GHCR) 发布。
-name: Build / Release Docker Image (GitHub)
+name: Build / Publish Docker Image (GHCR)
 
 on:
-  push:
-    branches:
-      - '**'
-    tags:
-      - 'v*.*.*'
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '.gitignore'
-      - 'img/**'
   workflow_dispatch:
     inputs:
-      version:
-        description: '手动发布版本号 (如 0.7.0); 留空则只构建不推送'
-        required: false
+      tag:
+        description: '镜像标签 / 版本号 (如 latest, 0.7.0)'
+        required: true
+        default: 'latest'
         type: string
+      tag_as_latest:
+        description: '是否同时标记为 latest 标签'
+        required: false
+        default: true
+        type: boolean
+      platforms:
+        description: '构建目标平台架构'
+        required: false
+        default: 'linux/amd64,linux/arm64'
+        type: choice
+        options:
+          - 'linux/amd64,linux/arm64'
+          - 'linux/amd64'
+          - 'linux/arm64'
+      push:
+        description: '是否发布到 GitHub 镜像仓库 (GHCR)'
+        required: false
+        default: true
+        type: boolean
+      skip_tests:
+        description: '是否跳过前置测试 (pytest/ruff/build)'
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags:
+      - 'v*.*.*'
 
 env:
   REGISTRY: ghcr.io
@@ -36,15 +45,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # 测试关卡: 后端 pytest/ruff + 前端 typecheck/build, 失败则不构建镜像
   test:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_tests) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
@@ -60,7 +69,7 @@ jobs:
         working-directory: backend
         run: python -m pytest tests/ -v
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
@@ -73,50 +82,48 @@ jobs:
           npm run typecheck
           npm run build
 
-  # 多架构构建; 普通分支只验证, tag/手动版本才推送 GHCR
   build:
     needs: test
+    if: always() && (needs.test.result == 'success' || needs.test.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - name: Set up QEMU (multi-arch support)
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@v3
 
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@v3
 
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # 版本 tag: v0.7.0 -> 0.7.0 / 0.7 / latest
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && inputs.tag_as_latest && (inputs.tag != 'latest') }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            # 手动发布: 直接使用输入的版本号
-            type=raw,value=${{ inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.version != '' }}
 
       - name: Log in to GHCR
-        if: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '') }}
-        uses: docker/login-action@v4
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.push) || startsWith(github.ref, 'refs/tags/v') }}
+        uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build / push image (linux/amd64, linux/arm64)
-        uses: docker/build-push-action@v7
+      - name: Build / push image
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          # 仅版本 tag 或手动指定版本时推送; 普通分支只构建验证
-          push: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '') }}
+          platforms: ${{ github.event_name == 'workflow_dispatch' && inputs.platforms || 'linux/amd64,linux/arm64' }}
+          push: ${{ (github.event_name == 'workflow_dispatch' && inputs.push) || startsWith(github.ref, 'refs/tags/v') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -125,22 +132,26 @@ jobs:
       - name: Job summary
         run: |
           {
-            echo "### Docker 镜像构建完成"
+            echo "### 🐳 Docker 镜像构建完成"
             echo ""
-            echo "- 触发: \`${{ github.event_name }}\` (\`${{ github.ref_name }}\`)"
-            echo "- 提交: \`${{ github.sha }}\`"
-            echo "- 平台: \`linux/amd64, linux/arm64\`"
-            if [ "${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '') }}" = "true" ]; then
-              echo "- 已发布 GHCR:"
+            echo "- **触发方式**: \`${{ github.event_name }}\`"
+            echo "- **代码提交**: \`${{ github.sha }}\`"
+            echo "- **目标架构**: \`${{ github.event_name == 'workflow_dispatch' && inputs.platforms || 'linux/amd64,linux/arm64' }}\`"
+            if [ "${{ (github.event_name == 'workflow_dispatch' && inputs.push) || startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+              echo "- **已发布到 GitHub 仓库 (GHCR)**:"
               echo '```'
               echo "${{ steps.meta.outputs.tags }}"
               echo '```'
+              echo "- **拉取命令示例**:"
+              echo '```bash'
+              FIRST_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)
+              echo "docker pull $FIRST_TAG"
+              echo '```'
             else
-              echo "- 未推送镜像 (分支构建验证)。发布请在版本 tag (v*.*.*) 上触发或手动输入版本号。"
+              echo "- **未推送到镜像仓库**（测试/本地构建模式）。"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # 版本 tag 发布时创建 GitHub Release (镜像在 GHCR)
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
@@ -149,7 +160,7 @@ jobs:
       contents: write
     steps:
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           body: |
