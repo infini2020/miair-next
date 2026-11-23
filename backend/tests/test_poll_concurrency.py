@@ -80,6 +80,26 @@ def _make_server(count: int, delay: float = 0.05):
     return server, speakers
 
 
+async def _cancel_and_await_task(task: asyncio.Task, timeout: float = 2.0) -> None:
+    """取消任务并做有界等待; 超时立即判失败, 不让 pytest 永久挂死
+
+    CPython 3.11 的 asyncio.wait_for 在"取消与内层完成同轮"时会吞掉
+    CancelledError (Lib/asyncio/tasks.py:463-472), 此时直接 `await task` 永远等不到
+    结束 —— 测试进程会无输出地挂死。asyncio.wait 到点即返回 pending, 把偶发
+    "永久卡死"变成 2 秒内可见的断言失败。
+    """
+    task.cancel()
+    _done, pending = await asyncio.wait({task}, timeout=timeout)
+    if pending:
+        task.cancel()  # 补一次取消, 避免 asyncio.run 收尾时再次无界等待
+        raise AssertionError(
+            f"轮询任务未在 {timeout:g} 秒内结束 (取消被吞?): CPython 3.11 的 "
+            "asyncio.wait_for 会吞掉 CancelledError (Lib/asyncio/tasks.py:463-472)"
+        )
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
 def test_poll_once_tolerates_concurrent_unregister():
     """迭代中注销渲染器不得抛 RuntimeError (原缺陷的直接复现)"""
 
@@ -104,9 +124,7 @@ def test_poll_task_survives_unregister_and_keeps_polling():
         await server.unregister_renderer("udn-1")
         await asyncio.sleep(0.3)  # 多跑几轮 (间隔被测试压缩)
         alive = not task.done()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        await _cancel_and_await_task(task)
         return alive, speakers
 
     alive, speakers = asyncio.run(run())
@@ -132,9 +150,7 @@ def test_single_round_failure_does_not_kill_poll_task():
         task = asyncio.create_task(server._poll_speaker_states())
         await asyncio.sleep(0.3)
         alive = not task.done()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        await _cancel_and_await_task(task)
         return alive, calls["n"]
 
     alive, n = asyncio.run(run())
@@ -150,9 +166,7 @@ def test_stop_is_not_interrupted_by_poll_task_error():
         # 造一个"已带异常结束"的轮询任务, 复刻崩溃后的现场
         task = asyncio.create_task(server._poll_speaker_states())
         server._poll_task = task
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        await _cancel_and_await_task(task)
         # 让任务恢复成抛 RuntimeError 的结束态
         server._poll_task = asyncio.create_task(_raise_runtime_error())
         await asyncio.sleep(0)

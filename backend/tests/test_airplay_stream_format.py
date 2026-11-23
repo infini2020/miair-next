@@ -99,6 +99,14 @@ class TestAudioStreamServerMp3:
                     for i in range(0, len(pcm), 4096):
                         server.write_pcm(bytes(pcm[i:i + 4096]))
                         await asyncio.sleep(0.005)
+                    # ffmpeg 启动要 100~300ms。若在它产出首帧前就 stop_streaming(),
+                    # 处理协程可能还没进读循环就看到 _active=False 而直接返回,
+                    # received 为空 -> 下面 data[0] 抛 IndexError (报告 1.4 的 flaky)。
+                    # 先等首帧再关流, 把"启动竞态"变成有序等待 (10s 上限兜底)。
+                    loop = asyncio.get_running_loop()
+                    deadline = loop.time() + 10
+                    while not received and loop.time() < deadline:
+                        await asyncio.sleep(0.02)
                     # 置 None 结束 PCM -> ffmpeg stdin 关闭 -> 输出 EOF
                     server.stop_streaming()
                     await asyncio.wait_for(pull_task, timeout=10)
@@ -106,6 +114,7 @@ class TestAudioStreamServerMp3:
 
             # MP3 帧头: ID3 标签或 0xFF Ex 同步字
             data = bytes(received)
+            assert data, "ffmpeg 未产出任何 MP3 数据 (启动竞态/环境问题), 非转码逻辑缺陷"
             assert data[:3] == b"ID3" or (data[0] == 0xFF and (data[1] & 0xE0) == 0xE0), \
                 f"非 MP3 数据: {data[:8]!r}"
             assert len(data) > 1000
