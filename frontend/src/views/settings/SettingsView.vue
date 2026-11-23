@@ -144,6 +144,14 @@
                     </n-text>
                   </div>
                 </n-form-item>
+                <n-form-item label="Spotify 音量控制">
+                  <div class="field-with-tip">
+                    <n-switch v-model:value="form.spotify_volume_control" />
+                    <n-text depth="3" class="field-tip">
+                      关闭时 Spotify 音量固定 100%，音箱音量由「跟随设备音量」决定；开启后跟随 Spotify App 音量。
+                    </n-text>
+                  </div>
+                </n-form-item>
                 <n-form-item label="Soloist API Key">
                   <div class="field-with-tip">
                     <n-input
@@ -567,6 +575,7 @@ const form = reactive({
   resume_delay_seconds: 3,
   default_volume: 50,
   follow_device_volume: false,
+  spotify_volume_control: false,
   dlna_port: 8200,
   airplay_mode: 'airplay1' as 'airplay1' | 'airplay2',
   airplay_stream_format: 'auto' as 'auto' | 'wav' | 'mp3',
@@ -714,6 +723,7 @@ async function load() {
     form.notify_tg_bot_token = s.notify_tg_bot_token || ''
     form.notify_tg_chat_id = s.notify_tg_chat_id || ''
     form.spotify_enabled = s.spotify_enabled ?? false
+    form.spotify_volume_control = s.spotify_volume_control ?? false
     form.spotify_device_name = s.spotify_device_name || ''
     form.spotify_did = s.spotify_did || ''
     form.spotify_api_key = s.spotify_api_key || ''

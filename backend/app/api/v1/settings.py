@@ -57,6 +57,7 @@ async def get_settings_api(
         "resume_delay_seconds": config.resume_delay_seconds,
         "default_volume": config.default_volume,
         "follow_device_volume": config.follow_device_volume,
+        "spotify_volume_control": config.spotify_volume_control,
         "auto_restart": config.auto_restart,
         "notify_type": config.notify_type,
         "notify_feishu_webhook": mask_secret(config.notify_feishu_webhook),
@@ -142,6 +143,8 @@ async def save_settings_api(
         config.default_volume = payload.default_volume
     if payload.follow_device_volume is not None:
         config.follow_device_volume = payload.follow_device_volume
+    if payload.spotify_volume_control is not None:
+        config.spotify_volume_control = payload.spotify_volume_control
     if payload.auto_restart is not None:
         config.auto_restart = payload.auto_restart
     if payload.default_cover_url is not None:

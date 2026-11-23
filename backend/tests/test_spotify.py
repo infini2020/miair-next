@@ -924,6 +924,8 @@ class TestSpotifyVolumeBehavior:
         controller = _FakeController()
         receiver = _make_receiver(controller)
         receiver.config.default_volume = 38
+        # 该用例覆盖旧的音量语义, 需显式开启「Spotify 音量控制」
+        receiver.config.spotify_volume_control = True
         receiver._pulse = _FakePulse()
         fake_ws = _FakeWs()
         receiver._ws = fake_ws
@@ -954,6 +956,8 @@ class TestSpotifyVolumeBehavior:
         controller = _FakeController()
         receiver = _make_receiver(controller)
         receiver.config.default_volume = 38
+        # 该用例覆盖旧的音量语义, 需显式开启「Spotify 音量控制」
+        receiver.config.spotify_volume_control = True
         receiver._pulse = _FakePulse()
         fake_ws = _FakeWs()
         receiver._ws = fake_ws
@@ -966,6 +970,179 @@ class TestSpotifyVolumeBehavior:
             assert controller.volumes == [], f"不应改硬件音量: {controller.volumes}"
             assert receiver._volume == 65
             await receiver.stop()
+
+        asyncio.run(scenario())
+
+
+class TestSpotifyVolumeControlSwitch:
+    """「Spotify 音量控制」开关: 默认关闭走新行为, 显式开启才回到旧的 App 控音量行为"""
+
+    @staticmethod
+    def _receiver(control: bool, follow: bool, default_volume: int = 38):
+        controller = _FakeController()
+        config = _FakeConfig()
+        config.spotify_volume_control = control
+        config.follow_device_volume = follow
+        config.default_volume = default_volume
+        receiver = _make_receiver(controller, config)
+        receiver._pulse = _FakePulse()
+        fake_ws = _FakeWs()
+        receiver._ws = fake_ws
+        return receiver, controller, fake_ws
+
+    @staticmethod
+    def _software_volumes(ws) -> list:
+        """下发给 Spotify 的软件音量序列"""
+        return [fields.get("volume") for cmd, fields in ws.sent if cmd == "set_volume"]
+
+    def test_default_switch_is_off(self):
+        """设置项默认关闭: 新行为默认生效, 需用户显式开启才回到旧行为"""
+        assert Config().spotify_volume_control is False
+
+    def test_default_off_start_uses_new_behavior(self):
+        """默认(关闭): 开播不下发 default_volume, 软件音量按 100 路径, 不提升硬件音量"""
+        controller = _FakeController()
+        config = _FakeConfig()  # 未设置该字段的配置等价于默认关闭
+        config.default_volume = 38
+        receiver = _make_receiver(controller, config)
+        receiver._pulse = _FakePulse()
+        ws = _FakeWs()
+        receiver._ws = ws
+
+        async def scenario():
+            receiver._running = True
+            receiver._is_active = True
+            await receiver._on_ws_event(
+                {"type": "playback_state", "status": "playing", "item": ENTITY, "volume": 100}
+            )
+            for _ in range(80):
+                await asyncio.sleep(0.05)
+                if receiver._speaker_active:
+                    break
+            volumes = self._software_volumes(ws)
+            assert volumes, f"应下发 Spotify 软件音量: {ws.sent}"
+            assert all(v == 100 for v in volumes), f"软件音量应恒为 100: {ws.sent}"
+            assert 38 not in volumes, f"不应下发 default_volume: {ws.sent}"
+            assert controller.volumes == [], f"开播不应改写硬件音量: {controller.volumes}"
+            assert receiver._volume_boosted is False
+            await receiver.stop()
+
+        asyncio.run(scenario())
+
+    def test_switch_on_keeps_legacy_start_behavior(self):
+        """显式开启: 开播下发 default_volume, 硬件音量置 100 (旧行为)"""
+        receiver, controller, ws = self._receiver(True, True)
+
+        async def scenario():
+            receiver._running = True
+            receiver._is_active = True
+            await receiver._on_ws_event(
+                {"type": "playback_state", "status": "playing", "item": ENTITY, "volume": 100}
+            )
+            for _ in range(80):
+                await asyncio.sleep(0.05)
+                if ws.sent and 100 in controller.volumes:
+                    break
+            assert ws.sent == [("set_volume", {"volume": 38})], ws.sent
+            assert 100 in controller.volumes, f"硬件音量应为 100: {controller.volumes}"
+            await receiver.stop()
+
+        asyncio.run(scenario())
+
+    def test_switch_off_start_does_not_send_default_volume(self):
+        """关闭: 开播不下发 default_volume, Spotify 软件音量按 100 路径"""
+        receiver, controller, ws = self._receiver(False, True)
+
+        async def scenario():
+            receiver._running = True
+            receiver._is_active = True
+            await receiver._on_ws_event(
+                {"type": "playback_state", "status": "playing", "item": ENTITY, "volume": 100}
+            )
+            for _ in range(80):
+                await asyncio.sleep(0.05)
+                if receiver._speaker_active:
+                    break
+            volumes = self._software_volumes(ws)
+            assert volumes, f"应下发 Spotify 软件音量: {ws.sent}"
+            assert all(v == 100 for v in volumes), f"软件音量应恒为 100: {ws.sent}"
+            assert 38 not in volumes, f"不应下发 default_volume: {ws.sent}"
+            assert controller.volumes == [], f"开播不应改写硬件音量: {controller.volumes}"
+            assert receiver._volume == 100
+            assert receiver._volume_boosted is False
+            await receiver.stop()
+
+        asyncio.run(scenario())
+
+    def test_switch_off_ignores_app_volume_events(self):
+        """关闭: 收到 App 音量事件被忽略, 软件音量维持 100 且硬件不被改写"""
+        receiver, controller, ws = self._receiver(False, True)
+
+        async def scenario():
+            receiver._running = True
+            receiver._is_active = True
+            receiver._speaker_active = True
+            receiver._volume = 100
+            await receiver._on_ws_event({"type": "volume_changed", "volume": 40})
+            await asyncio.sleep(0.1)
+            assert receiver._volume == 100, "软件音量应保持 100%"
+            assert controller.volumes == [], f"不应改写硬件音量: {controller.volumes}"
+            first = self._software_volumes(ws)
+            assert first and all(v == 100 for v in first), f"应重新下发 100: {ws.sent}"
+            # 节流窗口内的连续音量事件不应重复下发, 避免事件回环刷屏
+            await receiver._on_ws_event({"type": "volume_changed", "volume": 30})
+            assert len(self._software_volumes(ws)) == len(first), ws.sent
+            await receiver.stop()
+
+        asyncio.run(scenario())
+
+    def test_switch_off_follow_device_keeps_hardware_volume(self):
+        """关闭 + 跟随设备音量: 成为活动设备时不调用 set_volume 改音量"""
+        receiver, controller, ws = self._receiver(False, True)
+
+        async def scenario():
+            receiver._running = True
+            receiver._is_active = False
+            await receiver._on_ws_event(
+                {
+                    "type": "auth_state",
+                    "logged_in": True,
+                    "is_active": True,
+                    "device_name": "Test Device",
+                }
+            )
+            await asyncio.sleep(0.2)
+            assert receiver._is_active is True
+            assert controller.volumes == [], f"跟随设备音量不应改写硬件: {controller.volumes}"
+            assert receiver._volume_boosted is False
+            await receiver.stop()
+
+        asyncio.run(scenario())
+
+    def test_switch_off_without_follow_applies_default_volume(self):
+        """关闭 + 不跟随设备音量: 成为活动设备时 set_volume(default_volume)"""
+        receiver, controller, ws = self._receiver(False, False)
+
+        async def scenario():
+            receiver._running = True
+            receiver._is_active = False
+            await receiver._on_ws_event(
+                {
+                    "type": "auth_state",
+                    "logged_in": True,
+                    "is_active": True,
+                    "device_name": "Test Device",
+                }
+            )
+            for _ in range(40):
+                await asyncio.sleep(0.05)
+                if controller.volumes:
+                    break
+            assert controller.volumes == [38], controller.volumes
+            assert receiver._volume_boosted is False, "不应记录为已提升音量"
+            await receiver.stop()
+            # 未提升过音量, 停止时不应做多余还原
+            assert controller.volumes == [38], f"停止时不应重复还原: {controller.volumes}"
 
         asyncio.run(scenario())
 
@@ -1128,6 +1305,8 @@ class TestStopAndTransfer:
 
         receiver = SpotifyReceiver(_FakeConfig(), controller, "127.0.0.1")
         receiver.config.default_volume = 38
+        # 该组用例覆盖旧的「硬件置 100 后还原」语义, 显式开启音量控制
+        receiver.config.spotify_volume_control = True
         receiver._pulse = _FakePulse()
         receiver._ws = _FakeWs()
         receiver._running = True

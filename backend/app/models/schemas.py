@@ -81,6 +81,7 @@ class SettingsPayload(BaseModel):
     resume_delay_seconds: int | None = Field(default=None, ge=1, le=15)
     default_volume: int | None = Field(default=None, ge=1, le=100)
     follow_device_volume: bool | None = None
+    spotify_volume_control: bool | None = None
     auto_restart: bool | None = None
     default_cover_url: str | None = None
     default_audio_id: str | None = None

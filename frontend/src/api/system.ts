@@ -32,6 +32,7 @@ export interface Settings {
   resume_delay_seconds: number
   default_volume: number
   follow_device_volume: boolean
+  spotify_volume_control: boolean
   auto_restart: boolean
   default_cover_url: string
   default_audio_id: string

@@ -128,6 +128,10 @@ class Config:
     default_volume: int = 38
     # 实验性功能：跟随设备当前音量
     follow_device_volume: bool = True
+    # Spotify 音量控制：关闭(默认)=Spotify 软件音量恒为 100 (忽略 App 音量信号), 开播不提升硬件音量,
+    # 成为活动设备时按 follow_device_volume 决定硬件音量 (True 保持不动 / False 设为默认音量)；
+    # 开启=沿用旧逻辑 (App 控 Spotify 软件音量, 开播把硬件音量置 100)
+    spotify_volume_control: bool = False
     # 通用默认封面 (DLNA 路线)：用户在 Web 配置的封面图片 URL（可选）。
     # 为空时回退到后端内置默认封面 (/default-cover)，保证开箱即用。
     default_cover_url: str = ""

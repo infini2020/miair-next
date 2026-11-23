@@ -27,6 +27,8 @@ INTERRUPT_POLL_SECONDS = 5.0
 SPEAKER_OFFLINE_FAILURES = 3
 # 音箱在线检查轮询周期倍率
 SPEAKER_ONLINE_CHECK_TICKS = 1
+# 音量控制关闭时重新下发 set_volume(100) 的最小间隔 (秒), 避免 App 音量事件回环刷屏
+VOLUME_REASSERT_INTERVAL = 2.0
 
 
 def _free_port() -> int:
@@ -67,6 +69,8 @@ class SpotifyReceiver:
         self._volume: int | None = None
         self._start_volume_applied = False
         self._volume_boosted = False
+        # 最近一次向 Spotify 下发 set_volume 的时间 (音量控制关闭时用于节流)
+        self._volume_assert_at = 0.0
         self._audio_id = ""
         self._speaker_active = False
         self._speaker_offline = False
@@ -370,9 +374,67 @@ class SpotifyReceiver:
         except Exception as e:  # noqa: BLE001
             log.warning(f"恢复默认音量失败: {e}")
 
+    @property
+    def volume_control_enabled(self) -> bool:
+        """「Spotify 音量控制」开关 (默认关闭 = 软件音量恒 100%; 开启回到 App 控音量的旧逻辑)"""
+        return bool(getattr(self.config, "spotify_volume_control", False))
+
+    async def _enforce_software_volume(self) -> None:
+        """音量控制关闭时把 Spotify 软件音量固定回 100% (带节流, 避免事件回环刷屏)"""
+        self._volume = 100
+        now = time.time()
+        if now - self._volume_assert_at < VOLUME_REASSERT_INTERVAL:
+            return
+        self._volume_assert_at = now
+        if self._ws is None:
+            return
+        try:
+            ok = await self._ws.send("set_volume", volume=100)
+            log.debug(f"Spotify 音量控制已关闭, 忽略 App 音量并重置软件音量 100% (发送成功={ok})")
+        except Exception as e:  # noqa: BLE001
+            log.debug(f"重置 Spotify 软件音量失败: {e}")
+
+    async def _apply_device_volume_policy(self) -> None:
+        """成为活动设备时按「跟随设备音量」决定小爱硬件音量 (仅音量控制关闭时生效)
+
+        音量控制开启时沿用旧逻辑 (开播后硬件固定 100%), 这里不做任何事。
+        """
+        if self.volume_control_enabled or not self._is_active:
+            return
+        if bool(getattr(self.config, "follow_device_volume", True)):
+            getter = getattr(self.controller, "get_volume", None)
+            if callable(getter):
+                try:
+                    current = await getter()
+                    log.info(
+                        f"Spotify 音量控制已关闭, 成为活动设备时保持音箱当前音量: {current}%"
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log.debug(f"读取音箱当前音量失败 (不影响播放): {e}")
+            return
+        target = int(getattr(self.config, "default_volume", 0) or 0)
+        if target <= 0:
+            return
+        target = max(1, min(100, target))
+        try:
+            ok = await self.controller.set_volume(target)
+            if ok:
+                log.info(
+                    f"Spotify 音量控制已关闭, 成为活动设备时将音箱音量设为默认: {target}%"
+                )
+            else:
+                log.warning("设置音箱默认音量失败: 设备无响应")
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"设置音箱默认音量失败: {e}")
+
     async def _prepare_start_volume(self) -> None:
-        """开播初始化：设置 Spotify 软件音量为默认音量"""
+        """开播初始化：设置 Spotify 软件音量 (默认音量；音量控制关闭时恒为 100%)"""
         if self._start_volume_applied:
+            return
+        if not self.volume_control_enabled:
+            # 音量控制关闭: 忽略 default_volume, Spotify 软件音量始终为 100%
+            await self._enforce_software_volume()
+            self._start_volume_applied = True
             return
         target = int(getattr(self.config, "default_volume", 0) or 0)
         if target <= 0:
@@ -382,11 +444,16 @@ class SpotifyReceiver:
             ok = await self._ws.send("set_volume", volume=target)
             log.info(f"Spotify 开播音量设为默认音量: {target}% (发送成功={ok})")
             self._volume = target
+            self._volume_assert_at = time.time()
         self._start_volume_applied = True
 
     async def _apply_start_volume(self) -> None:
         """开播时将音箱硬件音量置为 100%，由客户端控制软件输出音量"""
         if not self._start_volume_applied:
+            return
+        if not self.volume_control_enabled:
+            # 音量控制关闭: 不提升硬件音量, 由成为活动设备时的策略决定是否改写
+            log.debug("Spotify 音量控制已关闭, 不将音箱硬件音量置 100%")
             return
         try:
             await asyncio.sleep(0.3)
@@ -442,6 +509,7 @@ class SpotifyReceiver:
                 log.info(
                     f"Spotify 重新成为活动设备, 最近播放状态={self._last_cluster_status}"
                 )
+                await self._apply_device_volume_policy()
                 if self._last_cluster_status in ("playing", "buffering"):
                     self._playback_status = self._last_cluster_status
                     self._request_play()
@@ -479,6 +547,7 @@ class SpotifyReceiver:
                     log.info(
                         f"Spotify 切换为本机活动设备, 最近播放状态={self._last_cluster_status}"
                     )
+                    await self._apply_device_volume_policy()
                     if self._last_cluster_status in ("playing", "buffering"):
                         self._playback_status = self._last_cluster_status
                         self._request_play()
@@ -487,7 +556,11 @@ class SpotifyReceiver:
         elif event_type == "volume_changed":
             volume = data.get("volume")
             if isinstance(volume, int):
-                self._volume = volume
+                if self.volume_control_enabled:
+                    self._volume = volume
+                else:
+                    # 音量控制关闭: 忽略 App 音量信号, 软件音量固定 100%
+                    await self._enforce_software_volume()
 
     async def _apply_playback(self, status: str | None, item, volume) -> None:
         if status:
@@ -497,7 +570,11 @@ class SpotifyReceiver:
             if parsed:
                 self._track = parsed
         if isinstance(volume, int):
-            self._volume = volume
+            if self.volume_control_enabled:
+                self._volume = volume
+            else:
+                # 音量控制关闭: 忽略 App 音量信号, 软件音量固定 100%
+                await self._enforce_software_volume()
         if not self._is_active:
             # 仅当本机为当前活动播放设备时才向音箱推流
             self._playback_status = "idle"
@@ -774,6 +851,7 @@ class SpotifyReceiver:
         self._is_active = active
         if active:
             log.info("Soloist: 已成为活动设备 (日志信号)")
+            await self._apply_device_volume_policy()
             if self._last_cluster_status in ("playing", "buffering"):
                 self._playback_status = self._last_cluster_status
                 self._request_play()
