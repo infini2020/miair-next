@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '镜像标签 / 版本号 (如 latest, 0.7.0)'
+        description: '镜像标签 / 版本号 (如 latest, 0.11.1)'
         required: true
         default: 'latest'
         type: string
@@ -45,9 +45,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 超时兜底说明:
+  # GitHub Actions 未声明 timeout-minutes 的 job 默认最长可跑 360 分钟(6 小时)。
+  # 本仓库历史上出现过 pytest 卡在单测里 >17 分钟不返回的情况, 一旦卡死会把
+  # runner 与该 workflow 的 concurrency 槽位一起占满, 后续发布全部排队。
+  # 因此为每个 job 显式设置 timeout-minutes, 让异常尽早失败并自动释放资源。
   test:
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_tests) }}
     runs-on: ubuntu-latest
+    # 30 分钟: ruff + pytest + 前端 typecheck/build 正常 2~3 分钟完成
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -86,6 +93,8 @@ jobs:
     needs: test
     if: always() && (needs.test.result == 'success' || needs.test.result == 'skipped')
     runs-on: ubuntu-latest
+    # 45 分钟: 多架构构建(QEMU 模拟 arm64)冷缓存下明显更慢, 需留出合理余量
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
@@ -156,6 +165,8 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    # 10 分钟: 仅调用 Releases API 创建 Release, 正常秒级完成
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
