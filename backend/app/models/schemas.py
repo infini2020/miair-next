@@ -101,6 +101,11 @@ class SettingsPayload(BaseModel):
     speakers: dict[str, SpeakerSettingPayload] | None = None
 
 
+class SpotifyProxyTestPayload(BaseModel):
+    """测试 Spotify 代理连通性: proxy=None 用已保存配置; 空串=测试直连"""
+    proxy: str | None = None
+
+
 # ---- 音箱 ----
 
 class RenameRequest(BaseModel):

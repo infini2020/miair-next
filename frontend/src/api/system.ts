@@ -66,6 +66,20 @@ export async function saveSettings(payload: Partial<Settings> & { password?: str
   return data
 }
 
+export interface SpotifyProxyTestResult {
+  ok: boolean
+  ip: string | null
+  elapsed_ms: number
+  via: 'proxy' | 'direct'
+  error: string | null
+}
+
+/** 测试 Spotify 代理连通性; proxy=null 用已保存配置, 空串=测试直连 */
+export async function testSpotifyProxy(proxy: string | null): Promise<SpotifyProxyTestResult> {
+  const { data } = await http.post('/settings/spotify/proxy-test', { proxy })
+  return data
+}
+
 export interface SystemStatus {
   version: string
   dlna_running: boolean

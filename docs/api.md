@@ -46,6 +46,7 @@
 | --- | --- | --- |
 | GET | `/api/v1/settings` | 读取配置(`?need_device_list=true` 附带设备列表) |
 | POST | `/api/v1/settings` | 保存配置并热重启子服务(cookie 支持脱敏回写还原) |
+| POST | `/api/v1/settings/spotify/proxy-test` | 测试 Spotify 代理连通性并返回出口 IP(不保存配置, `proxy=null` 用已保存配置) |
 
 保存设置后返回即触发后台热重启(不重启进程),响应中的 `message` 仅表示已受理。
 

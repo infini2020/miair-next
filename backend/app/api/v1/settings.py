@@ -18,8 +18,12 @@ from app.core.masking import (
 )
 from app.engine.const import NEED_USE_PLAY_MUSIC_API
 from app.engine.const import VERSION as ENGINE_VERSION
-from app.engine.spotify.soloist import ProxyConfigError, normalize_spotify_proxy
-from app.models.schemas import SettingsPayload
+from app.engine.spotify.soloist import (
+    ProxyConfigError,
+    normalize_spotify_proxy,
+    probe_proxy_exit_ip,
+)
+from app.models.schemas import SettingsPayload, SpotifyProxyTestPayload
 from app.services.orchestrator import Orchestrator
 
 log = logging.getLogger("miair")
@@ -218,3 +222,29 @@ async def save_settings_api(
     log.info("配置已保存, 正在热重启 DLNA/AirPlay 服务...")
     background.add_task(orch.restart_dlna_services)
     return {"ok": True, "message": "配置已保存, 服务正在重启"}
+
+
+@router.post("/settings/spotify/proxy-test")
+async def test_spotify_proxy_api(
+    payload: SpotifyProxyTestPayload,
+    config=Depends(get_engine_config),
+):
+    """测试 Spotify 代理连通性并返回出口 IP (不保存任何配置)
+
+    body.proxy = null 时使用已保存的 spotify_proxy; 空串表示测试直连。
+    探测目标固定为内置白名单 URL, 不接受客户端传入任意地址 (防 SSRF)。
+    """
+    raw = payload.proxy if payload.proxy is not None else getattr(config, "spotify_proxy", "")
+    try:
+        proxy = normalize_spotify_proxy(raw)
+    except ProxyConfigError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Spotify 代理地址无效: {e}",
+        ) from e
+    result = await probe_proxy_exit_ip(proxy)
+    log.info(
+        f"Spotify 代理测试: via={result['via']} ok={result['ok']} "
+        f"ip={result['ip'] or '-'} elapsed={result['elapsed_ms']}ms"
+    )
+    return result

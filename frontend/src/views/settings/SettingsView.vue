@@ -172,12 +172,22 @@
                 </n-form-item>
                 <n-form-item label="Soloist 代理">
                   <div class="field-with-tip">
-                    <n-input
-                      v-model:value="form.spotify_proxy"
-                      placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"
-                      clearable
-                    />
-                    <n-text depth="3" class="field-tip">
+                    <n-space align="center" :size="8" style="width: 100%">
+                      <n-input
+                        v-model:value="form.spotify_proxy"
+                        placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"
+                        clearable
+                        style="flex: 1"
+                      />
+                      <n-button size="small" :loading="proxyTesting" @click="testProxy">测试</n-button>
+                    </n-space>
+                    <n-text v-if="proxyTestResult?.ok" type="success" class="field-tip">
+                      已连接 · 出口 IP {{ proxyTestResult.ip }} · {{ proxyTestResult.elapsed_ms }}ms（{{ proxyTestResult.via === 'proxy' ? '经代理' : '直连' }}）
+                    </n-text>
+                    <n-text v-else-if="proxyTestResult" type="error" class="field-tip">
+                      连接失败：{{ proxyTestResult.error }}
+                    </n-text>
+                    <n-text v-else depth="3" class="field-tip">
                       用于 Soloist 下载与联网播放（支持 http/https/socks5），留空直连。
                     </n-text>
                   </div>
@@ -502,7 +512,7 @@ import {
   NDataTable, NEmpty, NTag, NRadioGroup, NRadioButton, useMessage, type DataTableColumns,
   type SelectOption,
 } from 'naive-ui'
-import { fetchSettings, fetchStatus, saveSettings, restartProcess, checkUpdate, testNotify, type UpdateInfo } from '@/api/system'
+import { fetchSettings, fetchStatus, saveSettings, restartProcess, checkUpdate, testNotify, testSpotifyProxy, type SpotifyProxyTestResult, type UpdateInfo } from '@/api/system'
 import { fetchLoginLogs, type LoginLogItem } from '@/api/auth'
 import {
   fetchSpotifyStatus,
@@ -868,7 +878,29 @@ async function doCheckUpdate() {
 const spotifyStatus = ref<SpotifyStatus | null>(null)
 const spotifyLoading = ref(false)
 const spotifyActionLoading = ref(false)
+// Soloist 代理连通性测试 (未保存的输入值也可直接测试)
+const proxyTesting = ref(false)
+const proxyTestResult = ref<SpotifyProxyTestResult | null>(null)
 let spotifyTimer: ReturnType<typeof setInterval> | undefined
+
+async function testProxy() {
+  proxyTesting.value = true
+  proxyTestResult.value = null
+  const proxy = form.spotify_proxy.trim()
+  try {
+    proxyTestResult.value = await testSpotifyProxy(proxy)
+  } catch (e: any) {
+    proxyTestResult.value = {
+      ok: false,
+      ip: null,
+      elapsed_ms: 0,
+      via: proxy ? 'proxy' : 'direct',
+      error: e.response?.data?.detail || e.message || '请求失败',
+    }
+  } finally {
+    proxyTesting.value = false
+  }
+}
 
 const spotifyTrackText = computed(() => {
   const t = spotifyStatus.value?.track

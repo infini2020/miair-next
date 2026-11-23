@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import http.client
+import json
 import logging
 import os
 import platform
@@ -168,6 +169,90 @@ def proxy_env(proxy: str | None) -> dict[str, str]:
             }
         )
     return env
+
+
+# 出口 IP 探测目标 (固定白名单, 禁止用户传入任意 URL, 防 SSRF)
+IP_PROBE_URLS = (
+    "https://api.ipify.org?format=json",
+    "https://ipinfo.io/json",
+    "http://ip-api.com/json",
+)
+# 单个探测请求超时 (秒)
+PROXY_TEST_REQUEST_TIMEOUT = 3.0
+# 整轮探测总超时 (秒)
+PROXY_TEST_TOTAL_TIMEOUT = 10.0
+
+
+def parse_public_ip(payload: bytes) -> str | None:
+    """从 ipify / ipinfo / ip-api 的 JSON 响应中提取出口 IP"""
+    try:
+        data = json.loads((payload or b"").decode("utf-8", errors="replace"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    for key in ("ip", "query"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def fetch_public_ip(url: str, opener, timeout: float) -> str:
+    """通过 opener (None=直连) 访问固定探测地址并返回出口 IP"""
+    request = urllib.request.Request(url, headers={"User-Agent": "miair-next"})
+    if opener is None:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            payload = resp.read(4096)
+    else:
+        with opener.open(request, timeout=timeout) as resp:
+            payload = resp.read(4096)
+    ip = parse_public_ip(payload)
+    if not ip:
+        raise ValueError("响应中未找到 IP")
+    return ip
+
+
+def probe_exit_ip_sync(proxy: str) -> tuple[str | None, str | None]:
+    """阻塞式出口 IP 探测 (调用方用 asyncio.to_thread 包裹)
+
+    按 IP_PROBE_URLS 顺序尝试, 任一成功即返回 (ip, None); 全失败返回 (None, 错误摘要)。
+    proxy 为空串时直连; 非空时应为 normalize_spotify_proxy 规范化后的地址。
+    """
+    opener = build_proxy_opener(proxy) if proxy else None
+    errors: list[str] = []
+    for url in IP_PROBE_URLS:
+        try:
+            return fetch_public_ip(url, opener, PROXY_TEST_REQUEST_TIMEOUT), None
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{url}: {e}")
+    return None, "; ".join(errors)
+
+
+async def probe_proxy_exit_ip(proxy: str) -> dict:
+    """测试 Spotify 代理连通性并返回出口 IP (供设置页「测试」按钮调用)"""
+    started = time.monotonic()
+    via = "proxy" if proxy else "direct"
+    ip: str | None = None
+    error: str | None = None
+    try:
+        ip, error = await asyncio.wait_for(
+            asyncio.to_thread(probe_exit_ip_sync, proxy),
+            timeout=PROXY_TEST_TOTAL_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        error = "连接超时"
+    except Exception as e:  # noqa: BLE001
+        error = str(e)
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    ok = bool(ip)
+    return {
+        "ok": ok,
+        "ip": ip,
+        "elapsed_ms": elapsed_ms,
+        "via": via,
+        "error": None if ok else (error or "无法获取出口 IP"),
+    }
 
 
 def parse_active_device_change(line: str) -> bool | None:
