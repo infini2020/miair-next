@@ -70,7 +70,8 @@ jobs:
   build:
     needs: [test, image-check]
     # main/tag publish the same complete image; PR builds never publish.
-    if: github.event_name == 'push'
+    # fork 守卫: Docker Hub 发布仅在上游主仓库执行; 本 fork 由 docker-build-release.yml 发布到 GHCR
+    if: github.event_name == 'push' && github.repository == 'deerwan/miair-next'
     runs-on: ubuntu-latest
     permissions:
       contents: read
