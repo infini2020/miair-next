@@ -48,6 +48,7 @@ export interface Settings {
   spotify_device_name: string
   spotify_did: string
   spotify_api_key: string
+  spotify_proxy: string
   speakers: Record<string, SpeakerSetting>
   need_use_play_music_api: string[]
   device_list?: { miotDID: string; hardware: string; name: string }[]

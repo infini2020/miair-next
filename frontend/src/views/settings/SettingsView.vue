@@ -170,6 +170,18 @@
                     </n-text>
                   </div>
                 </n-form-item>
+                <n-form-item label="Soloist 代理">
+                  <div class="field-with-tip">
+                    <n-input
+                      v-model:value="form.spotify_proxy"
+                      placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"
+                      clearable
+                    />
+                    <n-text depth="3" class="field-tip">
+                      用于 Soloist 下载与联网播放（支持 http/https/socks5），留空直连。
+                    </n-text>
+                  </div>
+                </n-form-item>
               </n-space>
             </n-form>
 
@@ -575,7 +587,7 @@ const form = reactive({
   resume_delay_seconds: 3,
   default_volume: 50,
   follow_device_volume: false,
-  spotify_volume_control: false,
+  spotify_volume_control: true,
   dlna_port: 8200,
   airplay_mode: 'airplay1' as 'airplay1' | 'airplay2',
   airplay_stream_format: 'auto' as 'auto' | 'wav' | 'mp3',
@@ -597,6 +609,7 @@ const form = reactive({
   spotify_device_name: '',
   spotify_did: '',
   spotify_api_key: '',
+  spotify_proxy: '',
 })
 
 // 目标音箱候选列表
@@ -723,10 +736,11 @@ async function load() {
     form.notify_tg_bot_token = s.notify_tg_bot_token || ''
     form.notify_tg_chat_id = s.notify_tg_chat_id || ''
     form.spotify_enabled = s.spotify_enabled ?? false
-    form.spotify_volume_control = s.spotify_volume_control ?? false
+    form.spotify_volume_control = s.spotify_volume_control ?? true
     form.spotify_device_name = s.spotify_device_name || ''
     form.spotify_did = s.spotify_did || ''
     form.spotify_api_key = s.spotify_api_key || ''
+    form.spotify_proxy = s.spotify_proxy || ''
     speakerOptions.value = Object.values(s.speakers || {})
       .filter((sp) => sp.enabled !== false)
       .map((sp) => ({

@@ -97,6 +97,7 @@ class SettingsPayload(BaseModel):
     spotify_device_name: str | None = None
     spotify_did: str | None = None
     spotify_api_key: str | None = None
+    spotify_proxy: str | None = None
     speakers: dict[str, SpeakerSettingPayload] | None = None
 
 

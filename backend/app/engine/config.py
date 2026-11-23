@@ -128,12 +128,11 @@ class Config:
     default_volume: int = 38
     # 实验性功能：跟随设备当前音量
     follow_device_volume: bool = True
-    # Spotify 音量控制：默认关闭 —— 避免 Spotify App 的音量残留把音箱音量带低,
-    # 让音箱音量由设备自身 /「跟随设备音量」决定。
+    # Spotify 音量控制：默认开启 —— 沿用旧逻辑 (App 控 Spotify 软件音量, 开播把硬件音量置 100,
+    # 停播还原 default_volume)。
     # 关闭: Spotify 软件音量恒为 100 (忽略 App 音量信号), 开播不提升硬件音量,
-    # 成为活动设备时按 follow_device_volume 决定硬件音量 (True 保持不动 / False 设为默认音量)；
-    # 开启: 沿用旧逻辑 (App 控 Spotify 软件音量, 开播把硬件音量置 100)
-    spotify_volume_control: bool = False
+    # 成为活动设备时按 follow_device_volume 决定硬件音量 (True 保持不动 / False 设为默认音量)
+    spotify_volume_control: bool = True
     # 通用默认封面 (DLNA 路线)：用户在 Web 配置的封面图片 URL（可选）。
     # 为空时回退到后端内置默认封面 (/default-cover)，保证开箱即用。
     default_cover_url: str = ""
@@ -163,6 +162,9 @@ class Config:
     spotify_device_name: str = ""
     spotify_did: str = ""
     spotify_api_key: str = ""
+    # Spotify 代理：Soloist 二进制下载与进程联网播放都走该代理
+    # (支持 http/https/socks5/socks5h, 未写协议按 http:// 补齐)；空串=直连
+    spotify_proxy: str = ""
     speakers: dict = field(default_factory=dict)
 
     # 保存配置的线程锁（类级别共享）

@@ -15,10 +15,11 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from typing import Callable
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 log = logging.getLogger("miair")
 
@@ -42,6 +43,131 @@ _ARCH_ALIASES = {
 
 _VERSION_RE = re.compile(r"soloist\s+(\S+)\s+build\s+(\d+)\s+\((\d{8})\)")
 _EXPIRES_RE = re.compile(r"client expires in (\d+) days")
+
+# Spotify 代理: Soloist 下载与进程联网播放共用 (http/https/socks5/socks5h)
+ALLOWED_PROXY_SCHEMES = ("http", "https", "socks5", "socks5h")
+SOCKS_PROXY_SCHEMES = ("socks5", "socks5h")
+# 本地 WebSocket / PulseAudio 不走代理
+LOCAL_NO_PROXY = "127.0.0.1,localhost,::1"
+# 已被告警的非法代理值, 避免每次下载/启动刷屏
+_warned_proxies: set[str] = set()
+
+
+class ProxyConfigError(ValueError):
+    """Spotify 代理地址非法"""
+
+
+def normalize_spotify_proxy(raw: str | None) -> str:
+    """规范化 Spotify 代理地址
+
+    - 空串/None: 返回空串 (直连)
+    - 未写协议: 按 http:// 补齐
+    - 仅允许 http/https/socks5/socks5h
+    - 保留 user:pass@ 认证信息, 丢弃 path/query
+    """
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    candidate = value if "://" in value else f"http://{value}"
+    if any(ch.isspace() for ch in candidate):
+        raise ProxyConfigError("代理地址不能包含空格等空白字符")
+    parts = urlsplit(candidate)
+    scheme = (parts.scheme or "").lower()
+    if scheme not in ALLOWED_PROXY_SCHEMES:
+        raise ProxyConfigError(
+            f"不支持的代理协议 {scheme or '(空)'}, 仅支持 http/https/socks5/socks5h"
+        )
+    host = parts.hostname
+    if not host:
+        raise ProxyConfigError("代理地址缺少主机名")
+    try:
+        port = parts.port
+    except ValueError as e:
+        raise ProxyConfigError(f"代理端口非法: {e}") from e
+    if port is not None and not 0 < port <= 65535:
+        raise ProxyConfigError(f"代理端口超出范围: {port}")
+    auth = ""
+    if parts.username is not None:
+        auth = parts.username
+        if parts.password is not None:
+            auth += f":{parts.password}"
+        auth += "@"
+    host_part = f"[{host}]" if ":" in host else host
+    netloc = f"{auth}{host_part}"
+    if port is not None:
+        netloc += f":{port}"
+    return f"{scheme}://{netloc}"
+
+
+def normalize_spotify_proxy_or_empty(raw: str | None) -> str:
+    """规范化代理地址, 非法时告警一次并降级为直连 (空串), 供接收器/下载使用"""
+    try:
+        return normalize_spotify_proxy(raw)
+    except ProxyConfigError as e:
+        value = (raw or "").strip()
+        if value not in _warned_proxies:
+            _warned_proxies.add(value)
+            log.warning(f"Spotify 代理配置无效, 将直连: {e}")
+        return ""
+
+
+def build_proxy_opener(proxy: str):
+    """按代理构造 urllib opener (http/https 用 ProxyHandler, socks5 用 SocksiPyHandler)"""
+    normalized = normalize_spotify_proxy(proxy)
+    if not normalized:
+        raise ProxyConfigError("代理地址为空, 无需构造 opener")
+    parts = urlsplit(normalized)
+    if parts.scheme in SOCKS_PROXY_SCHEMES:
+        # PySocks 是运行期依赖, 仅在真正配置 socks 代理时导入
+        import socks
+        from sockshandler import SocksiPyHandler
+
+        return urllib.request.build_opener(
+            SocksiPyHandler(
+                socks.SOCKS5,
+                parts.hostname or "",
+                parts.port or 1080,
+                rdns=parts.scheme == "socks5h",
+                username=unquote(parts.username) if parts.username else None,
+                password=unquote(parts.password) if parts.password else None,
+            )
+        )
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": normalized, "https": normalized})
+    )
+
+
+def proxy_env(proxy: str | None) -> dict[str, str]:
+    """Soloist 子进程代理环境变量 (大小写都设, 兼容 Go/libcurl)
+
+    - 始终返回 NO_PROXY/no_proxy, 避免本地 WebSocket 被代理拦截
+    - http/https 代理: HTTP_PROXY/HTTPS_PROXY + 小写形式
+    - socks5/socks5h 代理: ALL_PROXY + HTTPS_PROXY + 小写形式
+    - 空/非法: 只返回 NO_PROXY (直连)
+    """
+    env = {"NO_PROXY": LOCAL_NO_PROXY, "no_proxy": LOCAL_NO_PROXY}
+    normalized = normalize_spotify_proxy_or_empty(proxy)
+    if not normalized:
+        return env
+    if urlsplit(normalized).scheme in SOCKS_PROXY_SCHEMES:
+        env.update(
+            {
+                "ALL_PROXY": normalized,
+                "all_proxy": normalized,
+                "HTTPS_PROXY": normalized,
+                "https_proxy": normalized,
+            }
+        )
+    else:
+        env.update(
+            {
+                "HTTP_PROXY": normalized,
+                "http_proxy": normalized,
+                "HTTPS_PROXY": normalized,
+                "https_proxy": normalized,
+            }
+        )
+    return env
 
 
 def parse_active_device_change(line: str) -> bool | None:
@@ -144,8 +270,10 @@ class BinaryInfo:
 class SoloistBinary:
     """Soloist 二进制文件下载与版本管理"""
 
-    def __init__(self, data_dir: str):
+    def __init__(self, data_dir: str, proxy: str = ""):
         self.data_dir = data_dir
+        # Spotify 代理: 空串=直连; 非法值在下载时降级直连并告警一次
+        self.proxy = (proxy or "").strip()
         self.spotify_dir = os.path.join(data_dir, "spotify")
         self.bin_dir = os.path.join(self.spotify_dir, "bin")
         self.arch = detect_arch()
@@ -249,7 +377,25 @@ class SoloistBinary:
                     time.sleep(min(2.0 * attempt, 5.0))
         raise RuntimeError(f"Spotify Soloist 下载失败: {last_error}")
 
+    def _resolved_proxy(self) -> str:
+        """规范化用于下载的代理地址 (空/非法 → 直连, 非法只告警一次)"""
+        if not self.proxy:
+            return ""
+        return normalize_spotify_proxy_or_empty(self.proxy)
+
     def _download_to(self, url: str, dest: str, prefer_ipv4: bool = True) -> None:
+        parts = urlsplit(url)
+        if not parts.hostname:
+            raise ValueError(f"非法下载地址: {url}")
+        proxy = self._resolved_proxy()
+        if proxy:
+            # 走代理时无法保留 IPv4 优先逻辑, 交给 urllib 处理
+            self._download_via_proxy(url, dest, proxy)
+            return
+        self._download_direct(url, dest, prefer_ipv4=prefer_ipv4)
+
+    def _download_direct(self, url: str, dest: str, prefer_ipv4: bool = True) -> None:
+        """直连下载 (优先 IPv4), 无代理时使用"""
         parts = urlsplit(url)
         if not parts.hostname:
             raise ValueError(f"非法下载地址: {url}")
@@ -278,6 +424,17 @@ class SoloistBinary:
                     out.write(chunk)
         finally:
             conn.close()
+
+    def _download_via_proxy(self, url: str, dest: str, proxy: str) -> None:
+        """通过 urllib opener (HTTP 代理或 SOCKS5) 下载"""
+        opener = build_proxy_opener(proxy)
+        request = urllib.request.Request(url, headers={"User-Agent": "miair-next"})
+        with opener.open(request, timeout=DOWNLOAD_TIMEOUT) as resp:
+            status = getattr(resp, "status", None) or resp.getcode()
+            if status != 200:
+                raise RuntimeError(f"下载失败: HTTP {status}")
+            with open(dest, "wb") as out:
+                shutil.copyfileobj(resp, out, 64 * 1024)
 
     def _download_sync(self) -> None:
         os.makedirs(self.bin_dir, exist_ok=True)
@@ -320,6 +477,7 @@ class SoloistProcess:
         ws_port: int,
         initial_volume: int = 100,
         env: dict | None = None,
+        proxy: str = "",
     ):
         self.binary = binary
         self.data_dir = data_dir
@@ -329,6 +487,9 @@ class SoloistProcess:
         self.initial_volume = initial_volume
         # 传递 PulseAudio UNIX Socket 环境变量
         self.env = dict(env) if env else dict(os.environ)
+        # Spotify 代理: Soloist 联网播放走代理 (空=直连), 始终追加本地 NO_PROXY
+        self.proxy = (proxy or "").strip()
+        self.env.update(proxy_env(self.proxy))
         self.state_dir = os.path.join(data_dir, "spotify", "state")
         self.cache_dir = os.path.join(data_dir, "spotify", "cache")
         self.ready = asyncio.Event()

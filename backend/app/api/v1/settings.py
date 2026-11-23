@@ -18,6 +18,7 @@ from app.core.masking import (
 )
 from app.engine.const import NEED_USE_PLAY_MUSIC_API
 from app.engine.const import VERSION as ENGINE_VERSION
+from app.engine.spotify.soloist import ProxyConfigError, normalize_spotify_proxy
 from app.models.schemas import SettingsPayload
 from app.services.orchestrator import Orchestrator
 
@@ -74,6 +75,7 @@ async def get_settings_api(
         "spotify_device_name": config.spotify_device_name,
         "spotify_did": config.spotify_did,
         "spotify_api_key": mask_secret(config.spotify_api_key),
+        "spotify_proxy": config.spotify_proxy,
     }
 
     speakers_info = {}
@@ -112,6 +114,16 @@ async def save_settings_api(
                 status_code=400,
                 detail="自建tg反代地址必须以 http:// 或 https:// 开头",
             )
+    # Spotify 代理地址规范化 + 校验 (同样在配置变更前完成, 非法值直接 400)
+    spotify_proxy: str | None = None
+    if payload.spotify_proxy is not None:
+        try:
+            spotify_proxy = normalize_spotify_proxy(payload.spotify_proxy)
+        except ProxyConfigError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Spotify 代理地址无效: {e}",
+            ) from e
     if payload.account is not None:
         config.account = payload.account
     if payload.password is not None:
@@ -189,6 +201,8 @@ async def save_settings_api(
         config.spotify_api_key = unmask_secret(
             payload.spotify_api_key.strip(), config.spotify_api_key
         )
+    if spotify_proxy is not None:
+        config.spotify_proxy = spotify_proxy
 
     if payload.speakers:
         for did, speaker_data in payload.speakers.items():

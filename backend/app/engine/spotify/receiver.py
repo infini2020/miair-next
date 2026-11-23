@@ -145,7 +145,8 @@ class SpotifyReceiver:
                 self._last_error = "未配置 Spotify Soloist API Key"
                 raise RuntimeError(self._last_error)
             try:
-                self._binary = SoloistBinary(self.data_dir)
+                proxy = getattr(self.config, "spotify_proxy", "") or ""
+                self._binary = SoloistBinary(self.data_dir, proxy=proxy)
                 info = await self._binary.ensure()
                 self._binary_info = info.to_dict()
 
@@ -164,6 +165,7 @@ class SpotifyReceiver:
                     self.device_name,
                     self._ws_port,
                     env=self._pulse.child_env,
+                    proxy=proxy,
                 )
                 self._proc.on_exit = self._on_soloist_exit
                 self._proc.on_active_changed = self._on_soloist_active_changed
@@ -245,8 +247,10 @@ class SpotifyReceiver:
     async def update_binary(self) -> None:
         """强制重新下载 Soloist (用于构建过期或手动更新)"""
         try:
-            if self._binary is None:
-                self._binary = SoloistBinary(self.data_dir)
+            # 每次都按当前配置重建, 保证改了代理后强制更新也走新代理
+            self._binary = SoloistBinary(
+                self.data_dir, proxy=getattr(self.config, "spotify_proxy", "") or ""
+            )
             await self._binary.ensure(force=True)
             self._binary_info = self._binary.info.to_dict()
             if self._running:
@@ -377,7 +381,7 @@ class SpotifyReceiver:
     @property
     def volume_control_enabled(self) -> bool:
         """「Spotify 音量控制」开关 (默认关闭 = 软件音量恒 100%; 开启回到 App 控音量的旧逻辑)"""
-        return bool(getattr(self.config, "spotify_volume_control", False))
+        return bool(getattr(self.config, "spotify_volume_control", True))
 
     async def _enforce_software_volume(self) -> None:
         """音量控制关闭时把 Spotify 软件音量固定回 100% (带节流, 避免事件回环刷屏)"""
