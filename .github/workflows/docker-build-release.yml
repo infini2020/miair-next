@@ -170,6 +170,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      # 镜像 tag 由 metadata-action 的 semver pattern 产出, 不带 leading "v";
+      # 而 github.ref_name 是 "v0.11.1" —— 直接用会让 Release 里的 pull 示例 404。
+      - name: Compute image tag (strip leading v)
+        id: image
+        run: echo "tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -178,5 +184,5 @@ jobs:
             Docker 镜像已发布到 GitHub Container Registry（标签为版本号）：
 
             ```bash
-            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            docker pull ghcr.io/${{ github.repository }}:${{ steps.image.outputs.tag }}
             ```
