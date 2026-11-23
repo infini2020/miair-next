@@ -1665,12 +1665,30 @@ class DeviceServer:
         # 停止轮询
         if self._poll_task:
             self._poll_task.cancel()
-            try:
-                await self._poll_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:  # noqa: BLE001
-                log.warning(f"停止状态轮询任务时异常: {e}")
+            # 有界等待: CPython 3.11 的 asyncio.wait_for 在"取消与内层完成同轮"时
+            # 会吞掉 CancelledError (Lib/asyncio/tasks.py:463-472), 此时轮询任务
+            # 一边 cancelling()==1 一边继续跑, 无界 await 会让 stop() 永久挂起。
+            # asyncio.wait 只等 timeout 到点, 不等待取消真正完成, 不会被该缺陷拖住;
+            # 同理不要改成 wait_for(self._poll_task, 5), 它超时后仍会 await 取消。
+            _done, pending = await asyncio.wait({self._poll_task}, timeout=5)
+            if pending:
+                self._poll_task.cancel()  # 补一次取消, 但不再等它结束
+                dids = [
+                    getattr(getattr(r, "speaker", None), "did", None)
+                    for r in list(self.renderers.values())
+                ]
+                log.warning(
+                    "状态轮询任务取消未生效 (疑似 wait_for 吞取消), 放弃等待: "
+                    f"task={self._poll_task.get_name()} done={self._poll_task.done()} "
+                    f"cancelling={self._poll_task.cancelling()} dids={dids}"
+                )
+            else:
+                try:
+                    self._poll_task.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:  # noqa: BLE001
+                    log.warning(f"停止状态轮询任务时异常: {e}")
             self._poll_task = None
 
         # 停止周期性缓冲清理

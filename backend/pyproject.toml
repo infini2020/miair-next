@@ -20,6 +20,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+    # 进程级超时兜底: 守护线程到点 dump 栈并硬杀, 不依赖 asyncio 取消机制
+    # (3.10/3.11 的 wait_for 可能吞掉 CancelledError, 见 tests/test_poll_concurrency.py)
+    "pytest-timeout>=2.3",
     "httpx>=0.27",
     "ruff>=0.6",
     "watchfiles>=0.21",
@@ -31,6 +34,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[tool.pytest.ini_options]
+# 任何单测卡死都应在 120s 内被守护线程杀掉并留下栈, 而不是让 CI 白等到 job 超时。
+# 用 thread 而非 signal: 不依赖事件循环的取消机制, 对 3.10/3.11 的 wait_for 缺陷免疫。
+addopts = "--timeout=120 --timeout-method=thread"
 
 [tool.ruff]
 line-length = 100
