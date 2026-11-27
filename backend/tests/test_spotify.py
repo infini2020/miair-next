@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import os
 import tarfile
 import time
@@ -1046,8 +1047,8 @@ class TestSpotifyVolumeControlSwitch:
 
         asyncio.run(scenario())
 
-    def test_switch_off_ignores_app_volume_events(self):
-        """关闭: 收到 App 音量事件被忽略, 软件音量维持 100 且硬件不被改写"""
+    def test_switch_off_corrects_app_volume_events(self):
+        """关闭: App 每次下调都拉回 100, 相同值 0.3s 内只防抖一次"""
         receiver, controller, ws = self._receiver(False, True)
 
         async def scenario():
@@ -1056,14 +1057,17 @@ class TestSpotifyVolumeControlSwitch:
             receiver._speaker_active = True
             receiver._volume = 100
             await receiver._on_ws_event({"type": "volume_changed", "volume": 40})
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)
             assert receiver._volume == 100, "软件音量应保持 100%"
             assert controller.volumes == [], f"不应改写硬件音量: {controller.volumes}"
             first = self._software_volumes(ws)
             assert first and all(v == 100 for v in first), f"应重新下发 100: {ws.sent}"
-            # 节流窗口内的连续音量事件不应重复下发, 避免事件回环刷屏
+            # 不同上报值应立即纠正 (不被防抖吞掉)
             await receiver._on_ws_event({"type": "volume_changed", "volume": 30})
-            assert len(self._software_volumes(ws)) == len(first), ws.sent
+            assert len(self._software_volumes(ws)) == len(first) + 1, ws.sent
+            # 相同上报值在 0.3s 防抖窗口内不重复下发
+            await receiver._on_ws_event({"type": "volume_changed", "volume": 30})
+            assert len(self._software_volumes(ws)) == len(first) + 1, ws.sent
             await receiver.stop()
 
         asyncio.run(scenario())
@@ -1115,6 +1119,165 @@ class TestSpotifyVolumeControlSwitch:
             await receiver.stop()
             # 未提升过音量, 停止时不应做多余还原
             assert controller.volumes == [38], f"停止时不应重复还原: {controller.volumes}"
+
+        asyncio.run(scenario())
+
+
+class TestSpotifyVolumeRampCorrection:
+    """音量控制关闭: App 下调音量即时拉回 100% + 2s 周期兜底"""
+
+    @staticmethod
+    def _receiver():
+        controller = _FakeController()
+        config = _FakeConfig()
+        config.spotify_volume_control = False
+        config.follow_device_volume = True
+        config.default_volume = 38
+        receiver = _make_receiver(controller, config)
+        receiver._pulse = _FakePulse()
+        ws = _FakeWs()
+        receiver._ws = ws
+        return receiver, controller, ws
+
+    @staticmethod
+    def _volume_cmds(ws) -> list:
+        return [fields.get("volume") for cmd, fields in ws.sent if cmd == "set_volume"]
+
+    def test_low_volume_corrected_immediately_with_info_log(self, caplog):
+        receiver, controller, ws = self._receiver()
+
+        async def scenario():
+            receiver._running = True
+            with caplog.at_level(logging.INFO, logger="miair"):
+                await receiver._on_ws_event({"type": "volume_changed", "volume": 43})
+            assert self._volume_cmds(ws) == [100], ws.sent
+            assert receiver._volume == 100
+            assert controller.volumes == [], f"不应改写硬件音量: {controller.volumes}"
+            await receiver.stop()
+
+        asyncio.run(scenario())
+        assert any(
+            "App 音量 43% → 已拉回 100%" in record.message for record in caplog.records
+        ), [r.message for r in caplog.records]
+
+    def test_consecutive_downgrades_all_corrected(self):
+        receiver, controller, ws = self._receiver()
+
+        async def scenario():
+            receiver._running = True
+            for value in (43, 20, 5):
+                await receiver._on_ws_event({"type": "volume_changed", "volume": value})
+            assert self._volume_cmds(ws) == [100, 100, 100], ws.sent
+            await receiver.stop()
+
+        asyncio.run(scenario())
+
+    def test_volume_100_not_sent(self):
+        receiver, controller, ws = self._receiver()
+
+        async def scenario():
+            receiver._running = True
+            await receiver._on_ws_event({"type": "volume_changed", "volume": 100})
+            await asyncio.sleep(0.05)
+            assert self._volume_cmds(ws) == [], ws.sent
+            assert receiver._volume == 100
+            await receiver.stop()
+
+        asyncio.run(scenario())
+
+    def test_float_and_numeric_string_corrected(self):
+        receiver, controller, ws = self._receiver()
+
+        async def scenario():
+            receiver._running = True
+            await receiver._on_ws_event({"type": "volume_changed", "volume": 43.5})
+            await receiver._on_ws_event({"type": "volume_changed", "volume": "20"})
+            assert self._volume_cmds(ws) == [100, 100], ws.sent
+            await receiver.stop()
+
+        asyncio.run(scenario())
+
+    def test_playback_state_volume_corrected(self):
+        receiver, controller, ws = self._receiver()
+
+        async def scenario():
+            receiver._running = True
+            await receiver._apply_playback(None, None, 38)
+            assert self._volume_cmds(ws) == [100], ws.sent
+            await receiver.stop()
+
+        asyncio.run(scenario())
+
+    def test_periodic_guard_corrects_low_volume(self, monkeypatch):
+        from app.engine.spotify import receiver as receiver_mod
+
+        receiver, controller, ws = self._receiver()
+        receiver._running = True
+        receiver._paired = True
+        receiver._volume = 60
+        monkeypatch.setattr(receiver_mod, "VOLUME_GUARD_INTERVAL", 0.02)
+
+        async def scenario():
+            receiver._start_volume_guard()
+            for _ in range(60):
+                await asyncio.sleep(0.02)
+                if self._volume_cmds(ws):
+                    break
+            assert self._volume_cmds(ws) == [100], ws.sent
+            assert any(cmd == "get_state" for cmd, _ in ws.sent), ws.sent
+            assert receiver._volume == 100
+            receiver._cancel_volume_guard()
+            await asyncio.sleep(0)
+            assert receiver._volume_guard_task is None
+
+        asyncio.run(scenario())
+
+    def test_periodic_guard_skips_when_volume_100(self, monkeypatch):
+        from app.engine.spotify import receiver as receiver_mod
+
+        receiver, controller, ws = self._receiver()
+        receiver._running = True
+        receiver._paired = True
+        receiver._volume = 100
+        monkeypatch.setattr(receiver_mod, "VOLUME_GUARD_INTERVAL", 0.02)
+
+        async def scenario():
+            receiver._start_volume_guard()
+            await asyncio.sleep(0.1)
+            assert ws.sent == [], ws.sent
+            receiver._cancel_volume_guard()
+            await asyncio.sleep(0)
+            assert receiver._volume_guard_task is None
+
+        asyncio.run(scenario())
+
+    def test_stop_cancels_volume_guard_task(self):
+        receiver, controller, ws = self._receiver()
+        receiver._volume = 60
+
+        async def scenario():
+            receiver._running = True
+            receiver._paired = True
+            receiver._start_volume_guard()
+            task = receiver._volume_guard_task
+            assert task is not None
+            await receiver.stop()
+            assert receiver._volume_guard_task is None
+            await asyncio.sleep(0)
+            assert task.done(), "停止后兜底任务应已取消"
+
+        asyncio.run(scenario())
+
+    def test_control_on_does_not_start_guard(self):
+        receiver = _make_receiver(_FakeController())  # 默认开启音量控制
+        receiver._pulse = _FakePulse()
+        receiver._ws = _FakeWs()
+
+        async def scenario():
+            receiver._running = True
+            receiver._start_volume_guard()
+            assert receiver._volume_guard_task is None
+            await receiver.stop()
 
         asyncio.run(scenario())
 

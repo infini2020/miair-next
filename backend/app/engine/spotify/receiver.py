@@ -27,8 +27,32 @@ INTERRUPT_POLL_SECONDS = 5.0
 SPEAKER_OFFLINE_FAILURES = 3
 # 音箱在线检查轮询周期倍率
 SPEAKER_ONLINE_CHECK_TICKS = 1
-# 音量控制关闭时重新下发 set_volume(100) 的最小间隔 (秒), 避免 App 音量事件回环刷屏
-VOLUME_REASSERT_INTERVAL = 2.0
+# 音量控制关闭时相同上报值的最小去重间隔 (秒), 仅防抖; 不同值每次都纠正
+VOLUME_REASSERT_INTERVAL = 0.3
+# 音量控制关闭时的周期兜底间隔 (秒): 事件断流时也能把音量拉回 100%
+VOLUME_GUARD_INTERVAL = 2.0
+
+
+def _coerce_volume(value) -> int | None:
+    """把 App 上报的音量 (int/float/数字字符串) 归一化为整数百分比"""
+    if isinstance(value, bool):
+        # bool 是 int 子类, 但音量语义上无意义
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):  # NaN/Inf
+            return None
+        return int(round(value))
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return int(round(float(text)))
+        except ValueError:
+            return None
+    return None
 
 
 def _free_port() -> int:
@@ -69,8 +93,9 @@ class SpotifyReceiver:
         self._volume: int | None = None
         self._start_volume_applied = False
         self._volume_boosted = False
-        # 最近一次向 Spotify 下发 set_volume 的时间 (音量控制关闭时用于节流)
+        # 最近一次向 Spotify 下发 set_volume 的时间与对应上报值 (音量控制关闭时用于防抖)
         self._volume_assert_at = 0.0
+        self._last_correction_volume: int | None = None
         self._audio_id = ""
         self._speaker_active = False
         self._speaker_offline = False
@@ -93,6 +118,8 @@ class SpotifyReceiver:
         self._restart_task: asyncio.Task | None = None
         self._update_task: asyncio.Task | None = None
         self._active_poll_task: asyncio.Task | None = None
+        # 音量控制关闭时的周期兜底任务 (随接收器启停)
+        self._volume_guard_task: asyncio.Task | None = None
         self._updating = False
 
     @property
@@ -188,6 +215,8 @@ class SpotifyReceiver:
                 self._expiry_days = self._proc.expiry_days
                 # 周期轮询活动设备状态
                 self._active_poll_task = asyncio.create_task(self._poll_active_state())
+                # 音量控制关闭时启动周期兜底, 防止事件断流导致音量停在低位
+                self._start_volume_guard()
                 log.info(
                     f"Spotify 接收器已启动: device={self.device_name!r} "
                     f"→ 音箱 {self.speaker.get_dlna_name()!r}"
@@ -286,6 +315,7 @@ class SpotifyReceiver:
             "_restart_task",
             "_update_task",
             "_active_poll_task",
+            "_volume_guard_task",
         ):
             task = getattr(self, attr)
             if task is None:
@@ -380,23 +410,85 @@ class SpotifyReceiver:
 
     @property
     def volume_control_enabled(self) -> bool:
-        """「Spotify 音量控制」开关 (默认关闭 = 软件音量恒 100%; 开启回到 App 控音量的旧逻辑)"""
+        """「Spotify 音量控制」开关 (默认开启 = App 控音量的旧逻辑; 关闭 = 软件音量恒 100%)"""
         return bool(getattr(self.config, "spotify_volume_control", True))
 
-    async def _enforce_software_volume(self) -> None:
-        """音量控制关闭时把 Spotify 软件音量固定回 100% (带节流, 避免事件回环刷屏)"""
-        self._volume = 100
+    async def _enforce_software_volume(self, reported: int | float | str | None = None) -> None:
+        """音量控制关闭时把 Spotify 软件音量拉回 100%
+
+        reported 为 App 上报的音量 (int/float/数字字符串); None 表示仅确保初始值 100%。
+        上报值已是 100 时不发命令; 相同上报值在 VOLUME_REASSERT_INTERVAL 内只纠正一次
+        (仅防抖, 不同值每次都立即纠正)。
+        """
+        app_volume = _coerce_volume(reported)
+        if app_volume == 100:
+            self._volume = 100
+            # 已经回到 100%, 之后的同类下调仍应即时纠正
+            self._last_correction_volume = None
+            return
         now = time.time()
-        if now - self._volume_assert_at < VOLUME_REASSERT_INTERVAL:
+        if (
+            app_volume is not None
+            and app_volume == self._last_correction_volume
+            and now - self._volume_assert_at < VOLUME_REASSERT_INTERVAL
+        ):
+            self._volume = 100
             return
         self._volume_assert_at = now
+        self._last_correction_volume = app_volume
+        self._volume = 100
         if self._ws is None:
             return
         try:
             ok = await self._ws.send("set_volume", volume=100)
-            log.debug(f"Spotify 音量控制已关闭, 忽略 App 音量并重置软件音量 100% (发送成功={ok})")
         except Exception as e:  # noqa: BLE001
             log.debug(f"重置 Spotify 软件音量失败: {e}")
+            return
+        if app_volume is not None:
+            log.info(
+                f"Spotify 音量控制已关闭, App 音量 {app_volume}% → 已拉回 100% "
+                f"(发送成功={ok})"
+            )
+        else:
+            log.debug(f"Spotify 音量控制已关闭, 软件音量已确保 100% (发送成功={ok})")
+
+    def _start_volume_guard(self) -> None:
+        """音量控制关闭时启动周期兜底任务; 开启时确保没有遗留任务"""
+        self._cancel_volume_guard()
+        if self.volume_control_enabled:
+            return
+        self._volume_guard_task = asyncio.create_task(self._volume_guard_loop())
+
+    def _cancel_volume_guard(self) -> None:
+        task = self._volume_guard_task
+        self._volume_guard_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _volume_guard_loop(self) -> None:
+        """周期兜底: 已配对且音量控制关闭时, 发现音量不是 100 就补一次纠正"""
+        try:
+            while self._running:
+                await asyncio.sleep(VOLUME_GUARD_INTERVAL)
+                if (
+                    not self._running
+                    or self.volume_control_enabled
+                    or not self._paired
+                    or self._ws is None
+                ):
+                    continue
+                if self._volume == 100:
+                    continue
+                # 先请求一次状态刷新 (协议支持), 再按已知音量兜底纠正
+                try:
+                    await self._ws.send("get_state")
+                except Exception as e:  # noqa: BLE001
+                    log.debug(f"Spotify 音量兜底刷新状态失败: {e}")
+                await self._enforce_software_volume(self._volume)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"Spotify 音量兜底任务异常退出: {e}")
 
     async def _apply_device_volume_policy(self) -> None:
         """成为活动设备时按「跟随设备音量」决定小爱硬件音量 (仅音量控制关闭时生效)
@@ -559,12 +651,13 @@ class SpotifyReceiver:
                         asyncio.create_task(self._ws.send("get_state"))
         elif event_type == "volume_changed":
             volume = data.get("volume")
-            if isinstance(volume, int):
-                if self.volume_control_enabled:
+            if self.volume_control_enabled:
+                # 音量控制开启: 保持旧行为 (仅接受 int)
+                if isinstance(volume, int):
                     self._volume = volume
-                else:
-                    # 音量控制关闭: 忽略 App 音量信号, 软件音量固定 100%
-                    await self._enforce_software_volume()
+            else:
+                # 音量控制关闭: App 下调音量时立即拉回 100% (支持 int/float/数字字符串)
+                await self._enforce_software_volume(volume)
 
     async def _apply_playback(self, status: str | None, item, volume) -> None:
         if status:
@@ -573,12 +666,13 @@ class SpotifyReceiver:
             parsed = parse_entity(item)
             if parsed:
                 self._track = parsed
-        if isinstance(volume, int):
-            if self.volume_control_enabled:
+        if self.volume_control_enabled:
+            # 音量控制开启: 保持旧行为 (仅接受 int)
+            if isinstance(volume, int):
                 self._volume = volume
-            else:
-                # 音量控制关闭: 忽略 App 音量信号, 软件音量固定 100%
-                await self._enforce_software_volume()
+        elif volume is not None:
+            # 音量控制关闭: App 下调音量时立即拉回 100%
+            await self._enforce_software_volume(volume)
         if not self._is_active:
             # 仅当本机为当前活动播放设备时才向音箱推流
             self._playback_status = "idle"
